@@ -1,12 +1,125 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="match_parent"
-    android:background="#000000">
+    android:layout_height="match_parent">
 
-    <com.hud.navi.HudView
-        android:id="@+id/hudView"
+    <!-- osmdroid 地图 -->
+    <org.osmdroid.views.MapView
+        android:id="@+id/mapView"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
+
+    <!-- HUD 叠加层：速度、路网数量、航向 -->
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|start"
+        android:layout_margin="16dp"
+        android:orientation="vertical"
+        android:background="#88000000"
+        android:padding="12dp">
+
+        <TextView
+            android:id="@+id/tvStatus"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="等待 GPS..."
+            android:textColor="#AACCEE"
+            android:textSize="14sp"
+            android:fontFamily="monospace" />
+
+        <TextView
+            android:id="@+id/tvRoads"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="路网: 0 段"
+            android:textColor="#66CC88"
+            android:textSize="14sp"
+            android:fontFamily="monospace"
+            android:layout_marginTop="4dp" />
+
+        <TextView
+            android:id="@+id/tvCoord"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="--"
+            android:textColor="#88AACC"
+            android:textSize="12sp"
+            android:fontFamily="monospace"
+            android:layout_marginTop="4dp" />
+    </LinearLayout>
+
+    <!-- 速度显示（左下角） -->
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|start"
+        android:layout_margin="20dp"
+        android:orientation="horizontal"
+        android:baselineAligned="true">
+
+        <TextView
+            android:id="@+id/tvSpeed"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="0"
+            android:textColor="#FFFFFF"
+            android:textSize="48sp"
+            android:fontFamily="monospace"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text=" km/h"
+            android:textColor="#88AACC"
+            android:textSize="18sp"
+            android:fontFamily="monospace"
+            android:layout_marginStart="4dp" />
+    </LinearLayout>
+
+    <!-- 地图样式切换按钮（右上角） -->
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:layout_margin="16dp"
+        android:orientation="vertical"
+        android:background="#88000000"
+        android:padding="8dp">
+
+        <TextView
+            android:id="@+id/btnSatellite"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="卫星"
+            android:textColor="#00E5FF"
+            android:textSize="13sp"
+            android:padding="8dp"
+            android:clickable="true"
+            android:focusable="true" />
+
+        <TextView
+            android:id="@+id/btnRoad"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="路网"
+            android:textColor="#99FFFFFF"
+            android:textSize="13sp"
+            android:padding="8dp"
+            android:clickable="true"
+            android:focusable="true" />
+    </LinearLayout>
+
+    <!-- HUD NAVI 标题 -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:layout_marginTop="16dp"
+        android:layout_marginEnd="120dp"
+        android:text="HUD NAVI v2.0"
+        android:textColor="#223344"
+        android:textSize="12sp" />
 
 </FrameLayout>
