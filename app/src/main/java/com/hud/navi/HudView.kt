@@ -150,22 +150,29 @@ class HudView @JvmOverloads constructor(
      * @return [screenX, screenY]，null 表示在相机后面不可见
      */
     private fun project(fwd: Float, right: Float, w: Float, h: Float, vpx: Float, vpy: Float): FloatArray? {
-        // 仅渲染前方 2m ~ 600m 范围
-        if (fwd < 2f || fwd > 600f) return null
+        // 渲染前方 -10m ~ 800m 范围（允许略微在车后，避免线段断裂）
+        if (fwd < -10f || fwd > 800f) return null
 
         // 焦距（像素），控制视野宽度
-        val focal = w * 0.85f
+        val focal = w * 0.7f
 
         // 相机空间坐标（45° 俯角）
+        // Z_cam = 深度方向（相机前方）
         val zCam = fwd * cos(pitchRad).toFloat()
-        val yCam = fwd * sin(pitchRad).toFloat() + cameraHeight.toFloat()
+        // Y_cam = 垂直方向（正=路面上方，相机看下方时为负）
+        val yCam = fwd * sin(pitchRad).toFloat() - cameraHeight.toFloat()
 
-        if (zCam < 1f) return null
+        // 近平面裁剪：深度太小会导致投影爆炸
+        if (zCam < 3f) return null
 
         // 透视投影
         val scale = focal / zCam
         val sx = vpx + right * scale
-        val sy = vpy + yCam * scale
+        // 关键：vpy 是灭点，Y_cam > 0 表示路面上方 → 屏幕上移（减）
+        val sy = vpy - yCam * scale
+
+        // 屏幕外裁剪（避免画到屏幕外面浪费性能）
+        if (sx < -w || sx > 2 * w || sy < -h || sy > 2 * h) return null
 
         return floatArrayOf(sx, sy, fwd)
     }
@@ -211,10 +218,10 @@ class HudView @JvmOverloads constructor(
             val baseColor = roadColors[seg.highwayType] ?: roadColors["road"]!!
             val baseWidth = roadWidths[seg.highwayType] ?: 3f
 
-            // 深度衰减：远处的路更细更暗
+            // 深度衰减：远处的路更细更暗（匹配 800m 查询半径）
             val avgDist = (sp1[2] + sp2[2]) / 2f
-            val distFade = (1f - (avgDist / 600f)).coerceIn(0.2f, 1f)
-            val widthFade = (1f - (avgDist / 800f)).coerceIn(0.3f, 1f)
+            val distFade = (1f - (avgDist / 800f)).coerceIn(0.15f, 1f)
+            val widthFade = (1f - (avgDist / 1000f)).coerceIn(0.2f, 1f)
 
             // 设置画笔
             val alpha = (distFade * 255).toInt().coerceIn(40, 255)
