@@ -26,6 +26,7 @@ class HudView @JvmOverloads constructor(
 
     // === 路网数据 ===
     var roads: List<RoadSegment> = emptyList()
+    var statusText: String = "等待 GPS 定位..."
 
     // === 相机参数 ===
     private val pitchDeg = 45.0
@@ -272,12 +273,15 @@ class HudView @JvmOverloads constructor(
         canvas.drawText(speedKmh.toString(), 40f, h - 40f, speedPaint)
         canvas.drawText("km/h", 40f + speedPaint.measureText(speedKmh.toString()) + 10f, h - 50f, unitPaint)
 
-        // 路名/状态（左上角）
+        // 状态信息（左上角）
         val roadCount = roads.size
         if (vehicleLat == 0.0) {
             canvas.drawText("等待 GPS 定位...", 40f, 60f, statusPaint)
         } else {
-            canvas.drawText("路网: $roadCount 段", 40f, 60f, infoPaint)
+            // 状态文本（可能含加载/错误信息）
+            val displayStatus = if (roadCount > 0) "路网: $roadCount 段" else statusText
+            val paintToUse = if (statusText.contains("失败") || statusText.contains("错误")) statusPaint else infoPaint
+            canvas.drawText(displayStatus, 40f, 60f, paintToUse)
             canvas.drawText(String.format("位置: %.4f, %.4f", vehicleLat, vehicleLng), 40f, 100f, infoPaint)
             canvas.drawText(String.format("航向: %.0f°", vehicleBearing), 40f, 140f, infoPaint)
         }
