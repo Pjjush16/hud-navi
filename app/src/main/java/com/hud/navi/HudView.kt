@@ -150,29 +150,27 @@ class HudView @JvmOverloads constructor(
      * @return [screenX, screenY]，null 表示在相机后面不可见
      */
     private fun project(fwd: Float, right: Float, w: Float, h: Float, vpx: Float, vpy: Float): FloatArray? {
-        // 渲染前方 -10m ~ 800m 范围（允许略微在车后，避免线段断裂）
-        if (fwd < -10f || fwd > 800f) return null
-
-        // 焦距（像素），控制视野宽度
-        val focal = w * 0.7f
+        // 焦距（像素）：0.2 倍宽度，确保 1km 内道路在屏幕可见范围
+        val focal = w * 0.2f
 
         // 相机空间坐标（45° 俯角）
-        // Z_cam = 深度方向（相机前方）
         val zCam = fwd * cos(pitchRad).toFloat()
-        // Y_cam = 垂直方向（正=路面上方，相机看下方时为负）
         val yCam = fwd * sin(pitchRad).toFloat() - cameraHeight.toFloat()
 
-        // 近平面裁剪：深度太小会导致投影爆炸
-        if (zCam < 3f) return null
+        // 防止除以零：zCam 接近 0 时裁剪（约 ±2.8m 内）
+        if (kotlin.math.abs(zCam) < 2f) return null
+
+        // 距离过远不渲染
+        val dist = kotlin.math.sqrt(fwd * fwd + right * right)
+        if (dist > 1200f) return null
 
         // 透视投影
         val scale = focal / zCam
         val sx = vpx + right * scale
-        // 关键：vpy 是灭点，Y_cam > 0 表示路面上方 → 屏幕上移（减）
-        val sy = vpy - yCam * scale
+        val sy = vpy + yCam * scale
 
-        // 屏幕外裁剪（避免画到屏幕外面浪费性能）
-        if (sx < -w || sx > 2 * w || sy < -h || sy > 2 * h) return null
+        // 宽松裁剪
+        if (sx < -3 * w || sx > 4 * w || sy < -3 * h || sy > 4 * h) return null
 
         return floatArrayOf(sx, sy, fwd)
     }
@@ -201,10 +199,10 @@ class HudView @JvmOverloads constructor(
      * 渲染路网（带深度衰减）
      */
     private fun drawRoads(canvas: Canvas, w: Float, h: Float, vpx: Float, vpy: Float) {
-        // 按距离排序：远的先画（被近的覆盖）
+        // 按到车辆的绝对距离排序：远的先画（被近的覆盖）
         val sortedRoads = roads.sortedByDescending { seg ->
             val mid = gpsToVehicle((seg.lat1 + seg.lat2) / 2, (seg.lng1 + seg.lng2) / 2)
-            mid[0]  // fwd
+            kotlin.math.sqrt(mid[0] * mid[0] + mid[1] * mid[1])  // 绝对距离
         }
 
         for (seg in sortedRoads) {
@@ -218,10 +216,12 @@ class HudView @JvmOverloads constructor(
             val baseColor = roadColors[seg.highwayType] ?: roadColors["road"]!!
             val baseWidth = roadWidths[seg.highwayType] ?: 3f
 
-            // 深度衰减：远处的路更细更暗（匹配 800m 查询半径）
-            val avgDist = (sp1[2] + sp2[2]) / 2f
-            val distFade = (1f - (avgDist / 800f)).coerceIn(0.15f, 1f)
-            val widthFade = (1f - (avgDist / 1000f)).coerceIn(0.2f, 1f)
+            // 深度衰减：用绝对距离（不管前后），远处更细更暗
+            val absDist1 = kotlin.math.sqrt(p1[0] * p1[0] + p1[1] * p1[1])
+            val absDist2 = kotlin.math.sqrt(p2[0] * p2[0] + p2[1] * p2[1])
+            val avgDist = (absDist1 + absDist2) / 2f
+            val distFade = (1f - (avgDist / 1000f)).coerceIn(0.15f, 1f)
+            val widthFade = (1f - (avgDist / 1200f)).coerceIn(0.2f, 1f)
 
             // 设置画笔
             val alpha = (distFade * 255).toInt().coerceIn(40, 255)
