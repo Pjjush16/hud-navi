@@ -1,0 +1,289 @@
+package com.hud.navi
+
+import android.content.Context
+import android.graphics.*
+import android.util.AttributeSet
+import android.view.View
+import kotlin.math.*
+
+/**
+ * HUD 矢量路网渲染视图
+ * 纯黑背景 + 矢量路网 + 45° 透视（Matrix 梯形变换）
+ * 无任何瓦片底图，专为挡风玻璃 HUD 设计
+ */
+class HudView @JvmOverloads constructor(
+    context: Context, attrs: AttributeSet? = null
+) : View(context, attrs) {
+
+    // === 车辆状态 ===
+    var vehicleLat: Double = 0.0
+    var vehicleLng: Double = 0.0
+    var vehicleBearing: Float = 0f
+    var vehicleSpeed: Float = 0f
+
+    // === 路网数据 ===
+    var roads: List<RoadSegment> = emptyList()
+    var statusText: String = "等待 GPS..."
+
+    // === 画笔 ===
+    private val roadPaint = Paint().apply {
+        isAntiAlias = true; style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
+    }
+    private val arrowPaint = Paint().apply {
+        isAntiAlias = true; style = Paint.Style.FILL
+        color = Color.parseColor("#00FF88")
+    }
+    private val arrowGlowPaint = Paint().apply {
+        isAntiAlias = true; style = Paint.Style.FILL
+        color = Color.parseColor("#00FF88")
+        maskFilter = BlurMaskFilter(15f, BlurMaskFilter.Blur.OUTER)
+    }
+    private val arrowOutline = Paint().apply {
+        isAntiAlias = true; style = Paint.Style.STROKE
+        strokeWidth = 2f; color = Color.parseColor("#003322")
+    }
+    private val infoPaint = Paint().apply {
+        color = Color.parseColor("#AACCEE"); textSize = 34f
+        typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        isAntiAlias = true
+    }
+    private val speedPaint = Paint().apply {
+        color = Color.WHITE; textSize = 72f
+        typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        isAntiAlias = true; isFakeBoldText = true
+    }
+    private val unitPaint = Paint().apply {
+        color = Color.parseColor("#667788"); textSize = 24f
+        typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+        isAntiAlias = true
+    }
+    private val statusPaint = Paint().apply {
+        color = Color.parseColor("#FF8844"); textSize = 30f; isAntiAlias = true
+    }
+    private val dotPaint = Paint().apply {
+        color = Color.WHITE; style = Paint.Style.FILL; isAntiAlias = true
+    }
+    private val ringPaint = Paint().apply {
+        color = Color.parseColor("#00FF88"); style = Paint.Style.STROKE
+        strokeWidth = 2.5f; isAntiAlias = true
+    }
+    private val gridPaint = Paint().apply {
+        color = Color.parseColor("#112233"); strokeWidth = 1f
+        style = Paint.Style.STROKE; isAntiAlias = true
+    }
+
+    // 道路颜色（明亮色彩，黑底高对比度）
+    private val roadColors = mapOf(
+        "motorway" to Color.parseColor("#FF5555"),
+        "motorway_link" to Color.parseColor("#FF5555"),
+        "trunk" to Color.parseColor("#FF9944"),
+        "trunk_link" to Color.parseColor("#FF9944"),
+        "primary" to Color.parseColor("#55CCFF"),
+        "primary_link" to Color.parseColor("#55CCFF"),
+        "secondary" to Color.parseColor("#55EEBB"),
+        "secondary_link" to Color.parseColor("#55EEBB"),
+        "tertiary" to Color.parseColor("#77DD99"),
+        "tertiary_link" to Color.parseColor("#77DD99"),
+        "residential" to Color.parseColor("#6699BB"),
+        "service" to Color.parseColor("#556677"),
+        "unclassified" to Color.parseColor("#668899"),
+        "living_street" to Color.parseColor("#668899"),
+        "road" to Color.parseColor("#6699BB")
+    )
+    private val roadWidths = mapOf(
+        "motorway" to 6f, "motorway_link" to 4f,
+        "trunk" to 5f, "trunk_link" to 3f,
+        "primary" to 4.5f, "primary_link" to 3f,
+        "secondary" to 3.5f, "secondary_link" to 2.5f,
+        "tertiary" to 3f, "tertiary_link" to 2f,
+        "residential" to 2.5f, "service" to 2f,
+        "unclassified" to 2f, "living_street" to 2f,
+        "road" to 2.5f
+    )
+
+    // 透视参数
+    private val maxRenderDist = 500f  // 最大渲染距离 500m
+    private val perspectiveNear = 1.0f   // 近处缩放
+    private val perspectiveFar = 0.25f   // 远处缩放（灭点压缩比）
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val w = width.toFloat()
+        val h = height.toFloat()
+
+        canvas.drawColor(Color.BLACK)
+
+        if (vehicleLat != 0.0 && roads.isNotEmpty()) {
+            drawRoadNetwork(canvas, w, h)
+        }
+
+        drawVehicleMarker(canvas, w, h)
+        drawHudInfo(canvas, w, h)
+    }
+
+    /**
+     * 渲染矢量路网（45° 透视）
+     *
+     * 原理：先把路网画在一张虚拟的俯视图上（GPS→米），
+     * 然后用 Matrix.setPolyToPoly 做梯形变换模拟 45° 倾斜。
+     * 近处（屏幕下方）宽，远处（屏幕上方）窄 → 汇聚到灭点。
+     */
+    private fun drawRoadNetwork(canvas: Canvas, w: Float, h: Float) {
+        val cx = w / 2
+        val cy = h * 0.85f  // 车辆在屏幕 85% 处（底部）
+        val metersToPixels = w / 400f  // 400m = 屏幕宽度
+
+        val bearingRad = Math.toRadians(vehicleBearing.toDouble()).toFloat()
+
+        // 保存画布状态
+        canvas.save()
+
+        // 按距离排序（远的先画，近的覆盖在上面）
+        val sortedRoads = roads.sortedByDescending { seg ->
+            val midFwd = (seg.lat1 + seg.lat2) / 2 - vehicleLat
+            val midRight = (seg.lng1 + seg.lng2) / 2 - vehicleLng
+            sqrt(midFwd * midFwd + midRight * midRight)
+        }
+
+        for (seg in sortedRoads) {
+            // GPS → 局部米坐标（北=east 右, fwd 上）
+            val cosLat = cos(Math.toRadians(vehicleLat)).toFloat()
+            val radDeg = Math.toRadians(1.0).toFloat() * 6371000f
+
+            val dx1 = ((seg.lng1 - vehicleLng) * radDeg * cosLat).toFloat()
+            val dy1 = ((seg.lat1 - vehicleLat) * radDeg).toFloat()
+            val dx2 = ((seg.lng2 - vehicleLng) * radDeg * cosLat).toFloat()
+            val dy2 = ((seg.lat2 - vehicleLat) * radDeg).toFloat()
+
+            // 旋转（车辆航向朝上）
+            val cosB = cos(bearingRad); val sinB = sin(bearingRad)
+            val rx1 = dx1 * sinB + dy1 * cosB
+            val ry1 = dx1 * cosB - dy1 * sinB  // 前方为正
+            val rx2 = dx2 * sinB + dy2 * cosB
+            val ry2 = dx2 * cosB - dy2 * sinB
+
+            // 距离裁剪
+            val d1 = sqrt(rx1 * rx1 + ry1 * ry1)
+            val d2 = sqrt(rx2 * rx2 + ry2 * ry2)
+            if (d1 > maxRenderDist && d2 > maxRenderDist) continue
+
+            // 透视变换：ry > 0 是前方，ry < 0 是后方
+            // 将 ry 映射到屏幕 Y（前方=上方=小 Y）
+            val (sx1, sy1) = projectPoint(rx1, ry1, cx, cy, metersToPixels, w, h) ?: continue
+            val (sx2, sy2) = projectPoint(rx2, ry2, cx, cy, metersToPixels, w, h) ?: continue
+
+            // 颜色和线宽
+            val color = roadColors[seg.highwayType] ?: roadColors["road"]!!
+            val baseW = roadWidths[seg.highwayType] ?: 2.5f
+            val avgD = (d1 + d2) / 2f
+
+            // 远处变细变暗
+            val fade = (1f - avgD / (maxRenderDist * 1.2f)).coerceIn(0.2f, 1f)
+            val widthScale = (1f - avgD / (maxRenderDist * 1.5f)).coerceIn(0.3f, 1f)
+
+            roadPaint.color = color
+            roadPaint.alpha = (fade * 230).toInt().coerceIn(50, 230)
+            roadPaint.strokeWidth = baseW * widthScale
+
+            canvas.drawLine(sx1, sy1, sx2, sy2, roadPaint)
+        }
+
+        canvas.restore()
+    }
+
+    /**
+     * 透视投影：将局部坐标 (rx, ry) 映射到屏幕坐标
+     *
+     * ry > 0 = 前方（屏幕上方），ry < 0 = 后方（屏幕下方）
+     * 使用非线性缩放模拟 45° 俯角透视：
+     * - 近处大、远处小
+     * - 远处水平压缩（汇聚灭点）
+     */
+    private fun projectPoint(rx: Float, ry: Float, cx: Float, cy: Float,
+                              m2px: Float, w: Float, h: Float): Pair<Float, Float>? {
+        val dist = sqrt(rx * rx + ry * ry)
+        if (dist > maxRenderDist) return null
+
+        // 前方距离（ry）映射到屏幕纵向位置
+        // ry > 0 → 屏幕上方（远），ry < 0 → 屏幕下方（近/身后）
+        val screenYoffset = ry * m2px  // 正值=上方
+
+        // 透视缩放因子：越远越小
+        // 0m → 1.0，500m → perspectiveFar
+        val t = (ry.coerceIn(0f, maxRenderDist) / maxRenderDist)
+        val perspScale = perspectiveNear - (perspectiveNear - perspectiveFar) * t
+
+        // 水平偏移（乘以透视缩放，远处压缩）
+        val screenX = cx + rx * m2px * perspScale
+
+        // 纵向位置：车辆位置 - 前方偏移（前方朝上）
+        val screenY = cy - screenYoffset * perspScale
+
+        // 裁剪
+        if (screenX < -w || screenX > 2 * w || screenY < -h * 0.5f || screenY > h * 1.5f) return null
+
+        return Pair(screenX, screenY)
+    }
+
+    /**
+     * 车辆位置标记（屏幕底部中心）
+     */
+    private fun drawVehicleMarker(canvas: Canvas, w: Float, h: Float) {
+        val cx = w / 2
+        val cy = h * 0.85f
+
+        // 绿色外圈
+        canvas.drawCircle(cx, cy, 18f, ringPaint)
+        // 白色内点
+        canvas.drawCircle(cx, cy, 5f, dotPaint)
+
+        // 前方方向线
+        val lineLen = 50f
+        canvas.drawLine(cx, cy, cx, cy - lineLen, ringPaint)
+
+        // 小三角箭头
+        val arrowPath = Path()
+        arrowPath.moveTo(cx, cy - lineLen - 12f)
+        arrowPath.lineTo(cx - 8f, cy - lineLen + 2f)
+        arrowPath.lineTo(cx + 8f, cy - lineLen + 2f)
+        arrowPath.close()
+        canvas.drawPath(arrowPath, arrowPaint)
+    }
+
+    /**
+     * HUD 信息覆盖层
+     */
+    private fun drawHudInfo(canvas: Canvas, w: Float, h: Float) {
+        // 速度（左下角）
+        val speedStr = vehicleSpeed.toInt().toString()
+        canvas.drawText(speedStr, 40f, h - 30f, speedPaint)
+        canvas.drawText("km/h", 40f + speedPaint.measureText(speedStr) + 8f, h - 40f, unitPaint)
+
+        // 状态信息（左上角）
+        if (vehicleLat == 0.0) {
+            canvas.drawText("等待 GPS 定位...", 30f, 55f, statusPaint)
+        } else {
+            val roadCount = roads.size
+            val status = if (roadCount > 0) "路网: $roadCount 段" else statusText
+            val paint = if (statusText.contains("失败") || statusText.contains("错误")) statusPaint else infoPaint
+            canvas.drawText(status, 30f, 55f, paint)
+            canvas.drawText(String.format("%.4f, %.4f", vehicleLat, vehicleLng), 30f, 90f, infoPaint)
+            canvas.drawText(String.format("航向 %.0f°", vehicleBearing), 30f, 125f, infoPaint)
+        }
+
+        // 右上角版本号
+        val titleP = Paint(infoPaint).apply {
+            textAlign = Paint.Align.RIGHT; textSize = 22f; color = Color.parseColor("#334455")
+        }
+        canvas.drawText("HUD NAVI v3.0", w - 20f, 45f, titleP)
+
+        // 罗盘方位
+        val dirs = arrayOf("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+        val idx = (((vehicleBearing + 22.5f) % 360f) / 45f).toInt() % 8
+        val compassP = Paint(infoPaint).apply {
+            textAlign = Paint.Align.RIGHT; textSize = 28f; color = Color.parseColor("#556677")
+        }
+        canvas.drawText(dirs[idx], w - 20f, 80f, compassP)
+    }
+}
