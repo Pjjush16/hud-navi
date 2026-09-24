@@ -84,16 +84,16 @@ class HudView @JvmOverloads constructor(
         strokeJoin = Paint.Join.ROUND
     }
 
-    // 道路宽度（按类型分级，白色统一）
+    // 道路宽度（15° 低视角，近处道路应很粗，模拟真实路面宽度）
     private val roadWidths = mapOf(
-        "motorway" to 14f, "motorway_link" to 12f,
-        "trunk" to 13f, "trunk_link" to 11f,
-        "primary" to 11f, "primary_link" to 9f,
-        "secondary" to 10f, "secondary_link" to 8f,
-        "tertiary" to 9f, "tertiary_link" to 7f,
-        "residential" to 8f, "service" to 7f,
-        "unclassified" to 8f, "living_street" to 8f,
-        "road" to 8f
+        "motorway" to 60f, "motorway_link" to 50f,
+        "trunk" to 55f, "trunk_link" to 45f,
+        "primary" to 45f, "primary_link" to 38f,
+        "secondary" to 40f, "secondary_link" to 32f,
+        "tertiary" to 36f, "tertiary_link" to 28f,
+        "residential" to 30f, "service" to 25f,
+        "unclassified" to 30f, "living_street" to 30f,
+        "road" to 30f
     )
     // 透视参数（15° 从地面 / 75° 从正上方）
     // 摄像头几乎平视前方，像真车挡风玻璃 HUD
@@ -172,10 +172,12 @@ class HudView @JvmOverloads constructor(
             val baseW = roadWidths[seg.highwayType] ?: 8f
             val avgD = (d1 + d2) / 2f
 
-            // 远处变细变暗（与透视除法匹配）
-            val fade = (1f - avgD / (maxRenderDist * 1.2f)).coerceIn(0.2f, 1f)
-            val perspWidthScale = 20f / (avgD + 20f)  // 1/d 透视缩放
-            val widthScale = perspWidthScale.coerceIn(0.15f, 1f)
+            // 远处变细变暗（与 15° 透视匹配）
+            val fade = (1f - avgD / (maxRenderDist * 1.2f)).coerceIn(0.15f, 1f)
+            // 15° 低视角：近处道路很粗，远处急剧变细（模拟真实透视）
+            val widthDepthScale = 8f  // 近距离衰减常数（越小近处越粗）
+            val perspWidthScale = widthDepthScale / (avgD + widthDepthScale)
+            val widthScale = perspWidthScale.coerceIn(0.05f, 1f)
 
             // 所有道路统一双线渲染：先画白色粗线（边线），再叠加黑色细线（填充）
             val outerW = baseW * 1.8f * widthScale  // 白色边线宽度
@@ -298,7 +300,7 @@ class HudView @JvmOverloads constructor(
         val titleP = Paint(infoPaint).apply {
             textAlign = Paint.Align.RIGHT; textSize = 22f; color = Color.parseColor("#334455")
         }
-        canvas.drawText("HUD NAVI v4.7", w - 20f, 45f, titleP)
+        canvas.drawText("HUD NAVI v4.8", w - 20f, 45f, titleP)
 
         // 罗盘方位
         val dirs = arrayOf("N", "NE", "E", "SE", "S", "SW", "W", "NW")
