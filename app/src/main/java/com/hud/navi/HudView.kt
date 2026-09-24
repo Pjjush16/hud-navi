@@ -84,10 +84,10 @@ class HudView @JvmOverloads constructor(
         "unclassified" to 8f, "living_street" to 8f,
         "road" to 8f
     )
-    // 透视参数
+    // 透视参数（75° 俯角）
     private val maxRenderDist = 500f  // 最大渲染距离 500m
     private val perspectiveNear = 1.0f   // 近处缩放
-    private val perspectiveFar = 0.25f   // 远处缩放（灭点压缩比）
+    private val perspectiveFar = 0.45f   // 远处缩放（75° 比 45° 压缩更弱，0.25→0.45）
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
@@ -105,16 +105,17 @@ class HudView @JvmOverloads constructor(
     }
 
     /**
-     * 渲染矢量路网（45° 透视）
+     * 渲染矢量路网（75° 透视）
      *
      * 原理：先把路网画在一张虚拟的俯视图上（GPS→米），
-     * 然后用 Matrix.setPolyToPoly 做梯形变换模拟 45° 倾斜。
+     * 然后用透视投影模拟 75° 俯角。
      * 近处（屏幕下方）宽，远处（屏幕上方）窄 → 汇聚到灭点。
+     * 75° 比 45° 更接近俯视，远处压缩更弱，前方视野更深。
      */
     private fun drawRoadNetwork(canvas: Canvas, w: Float, h: Float) {
         val cx = w / 2
-        val cy = h * 0.85f  // 车辆在屏幕 85% 处（底部）
-        val metersToPixels = w / 400f  // 400m = 屏幕宽度
+        val cy = h * 0.92f  // 车辆在屏幕 92% 处（更靠底部，拉近摄像头）
+        val metersToPixels = w / 250f  // 250m = 屏幕宽度（拉近，原来 400m）
 
         val bearingRad = Math.toRadians(vehicleBearing.toDouble()).toFloat()
 
@@ -187,9 +188,9 @@ class HudView @JvmOverloads constructor(
      * 透视投影：将局部坐标 (rx, ry) 映射到屏幕坐标
      *
      * ry > 0 = 前方（屏幕上方），ry < 0 = 后方（屏幕下方）
-     * 使用非线性缩放模拟 45° 俯角透视：
+     * 使用非线性缩放模拟 75° 俯角透视：
      * - 近处大、远处小
-     * - 远处水平压缩（汇聚灭点）
+     * - 远处水平压缩（汇聚灭点，75° 比 45° 更弱）
      */
     private fun projectPoint(rx: Float, ry: Float, cx: Float, cy: Float,
                               m2px: Float, w: Float, h: Float): Pair<Float, Float>? {
@@ -222,7 +223,7 @@ class HudView @JvmOverloads constructor(
      */
     private fun drawVehicleMarker(canvas: Canvas, w: Float, h: Float) {
         val cx = w / 2
-        val cy = h * 0.85f
+        val cy = h * 0.92f
 
         // 绿色外圈
         canvas.drawCircle(cx, cy, 18f, ringPaint)
@@ -267,7 +268,7 @@ class HudView @JvmOverloads constructor(
         val titleP = Paint(infoPaint).apply {
             textAlign = Paint.Align.RIGHT; textSize = 22f; color = Color.parseColor("#334455")
         }
-        canvas.drawText("HUD NAVI v4.3", w - 20f, 45f, titleP)
+        canvas.drawText("HUD NAVI v4.4", w - 20f, 45f, titleP)
 
         // 罗盘方位
         val dirs = arrayOf("N", "NE", "E", "SE", "S", "SW", "W", "NW")
