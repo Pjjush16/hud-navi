@@ -227,8 +227,8 @@ class HudView @JvmOverloads constructor(
         val fwd = ry.coerceAtLeast(0.1f)
 
         // 透视除法：1/d 映射
-        // depthScale=20 让 500m 落在灭点附近
-        val depthScale = 20f
+        // depthScale=5 摄像机距离5m，近处道路极大，远处快速汇聚到灭点
+        val depthScale = 5f
         val t = fwd / (fwd + depthScale)  // 0→0, ∞→1
 
         // 屏幕 Y：cy（近）→ vanishingY（远）
