@@ -84,10 +84,12 @@ class HudView @JvmOverloads constructor(
         "unclassified" to 8f, "living_street" to 8f,
         "road" to 8f
     )
-    // 透视参数（75° 俯角）
+    // 透视参数（15° 从地面 / 75° 从正上方）
+    // 摄像头几乎平视前方，像真车挡风玻璃 HUD
     private val maxRenderDist = 500f  // 最大渲染距离 500m
     private val perspectiveNear = 1.0f   // 近处缩放
-    private val perspectiveFar = 0.45f   // 远处缩放（75° 比 45° 压缩更弱，0.25→0.45）
+    private val perspectiveFar = 0.12f   // 远处缩放（15° 视角，远处强烈压缩）
+    private val cameraAngleRad = Math.toRadians(15.0).toFloat()  // 摄像头离地 15°
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
@@ -105,12 +107,11 @@ class HudView @JvmOverloads constructor(
     }
 
     /**
-     * 渲染矢量路网（75° 透视）
+     * 渲染矢量路网（15° 离地视角 / 75° 离正上方）
      *
-     * 原理：先把路网画在一张虚拟的俯视图上（GPS→米），
-     * 然后用透视投影模拟 75° 俯角。
-     * 近处（屏幕下方）宽，远处（屏幕上方）窄 → 汇聚到灭点。
-     * 75° 比 45° 更接近俯视，远处压缩更弱，前方视野更深。
+     * 摄像头近乎平视前方，像真车挡风玻璃 HUD。
+     * 使用 1/d 透视除法：近处道路极大，远处强烈压缩汇聚到灭点。
+     * 灭点（地平线）在屏幕 35% 处。
      */
     private fun drawRoadNetwork(canvas: Canvas, w: Float, h: Float) {
         val cx = w / 2
@@ -160,9 +161,10 @@ class HudView @JvmOverloads constructor(
             val baseW = roadWidths[seg.highwayType] ?: 8f
             val avgD = (d1 + d2) / 2f
 
-            // 远处变细变暗
+            // 远处变细变暗（与透视除法匹配）
             val fade = (1f - avgD / (maxRenderDist * 1.2f)).coerceIn(0.2f, 1f)
-            val widthScale = (1f - avgD / (maxRenderDist * 1.5f)).coerceIn(0.3f, 1f)
+            val perspWidthScale = 20f / (avgD + 20f)  // 1/d 透视缩放
+            val widthScale = perspWidthScale.coerceIn(0.15f, 1f)
 
             // 所有道路统一双线渲染：先画白色粗线（边线），再叠加黑色细线（填充）
             val outerW = baseW * 1.8f * widthScale  // 白色边线宽度
@@ -187,30 +189,38 @@ class HudView @JvmOverloads constructor(
     /**
      * 透视投影：将局部坐标 (rx, ry) 映射到屏幕坐标
      *
+     * 摄像头离地 15°（距正上方 75°），近乎平视前方。
      * ry > 0 = 前方（屏幕上方），ry < 0 = 后方（屏幕下方）
-     * 使用非线性缩放模拟 75° 俯角透视：
-     * - 近处大、远处小
-     * - 远处水平压缩（汇聚灭点，75° 比 45° 更弱）
+     * 使用 1/d 透视除法模拟真实透视：
+     * - 近处极大、远处极小（强烈的近大远小）
+     * - 灭点（地平线）在屏幕 35% 处
      */
     private fun projectPoint(rx: Float, ry: Float, cx: Float, cy: Float,
                               m2px: Float, w: Float, h: Float): Pair<Float, Float>? {
         val dist = sqrt(rx * rx + ry * ry)
         if (dist > maxRenderDist) return null
 
-        // 前方距离（ry）映射到屏幕纵向位置
-        // ry > 0 → 屏幕上方（远），ry < 0 → 屏幕下方（近/身后）
-        val screenYoffset = ry * m2px  // 正值=上方
+        // 灭点（地平线）位置
+        val vanishingY = h * 0.35f
+        // 从灭点到车辆的可用屏幕高度
+        val usableH = cy - vanishingY
 
-        // 透视缩放因子：越远越小
-        // 0m → 1.0，500m → perspectiveFar
-        val t = (ry.coerceIn(0f, maxRenderDist) / maxRenderDist)
-        val perspScale = perspectiveNear - (perspectiveNear - perspectiveFar) * t
+        // 前方距离（ry > 0 表示前方）
+        val fwd = ry.coerceAtLeast(0.1f)
 
-        // 水平偏移（乘以透视缩放，远处压缩）
+        // 透视除法：1/d 映射
+        // depthScale=20 让 500m 落在灭点附近
+        val depthScale = 20f
+        val t = fwd / (fwd + depthScale)  // 0→0, ∞→1
+
+        // 屏幕 Y：cy（近）→ vanishingY（远）
+        val screenY = cy - t * usableH
+
+        // 透视缩放：近处 1.0，远处急剧缩小
+        val perspScale = depthScale / (fwd + depthScale)
+
+        // 水平偏移（乘以透视缩放，远处压缩汇聚）
         val screenX = cx + rx * m2px * perspScale
-
-        // 纵向位置：车辆位置 - 前方偏移（前方朝上）
-        val screenY = cy - screenYoffset * perspScale
 
         // 裁剪
         if (screenX < -w || screenX > 2 * w || screenY < -h * 0.5f || screenY > h * 1.5f) return null
@@ -268,7 +278,7 @@ class HudView @JvmOverloads constructor(
         val titleP = Paint(infoPaint).apply {
             textAlign = Paint.Align.RIGHT; textSize = 22f; color = Color.parseColor("#334455")
         }
-        canvas.drawText("HUD NAVI v4.5", w - 20f, 45f, titleP)
+        canvas.drawText("HUD NAVI v4.6", w - 20f, 45f, titleP)
 
         // 罗盘方位
         val dirs = arrayOf("N", "NE", "E", "SE", "S", "SW", "W", "NW")
