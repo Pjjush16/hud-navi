@@ -13,6 +13,7 @@ import android.location.LocationManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import kotlin.math.*
@@ -88,6 +89,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
 
         requestPermissions()
+
+        // 初始化路网缓存
+        RoadCache.init(this)
     }
 
     private fun requestPermissions() {
@@ -235,17 +239,36 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         if (isFetching) return
         val dist = haversine(lastFetchLat, lastFetchLng, lat, lng)
         if (dist > FETCH_DISTANCE_M || (lastFetchLat == 0.0 && lat != 0.0)) {
-            isFetching = true
             lastFetchLat = lat; lastFetchLng = lng
+
+            // 1. 先查缓存
+            val cached = RoadCache.get(lat, lng)
+            if (cached != null) {
+                hudView.roads = cached
+                hudView.statusText = "${RoadCache.stats()}"
+                hudView.invalidate()
+                Log.d("MainActivity", "路网缓存命中: ${cached.size} 段")
+
+                // 缓存命中但仍可在后台静默刷新（不阻塞渲染）
+                silentBackgroundRefresh(lat, lng)
+                return
+            }
+
+            // 2. 缓存未命中，走网络
+            isFetching = true
             hudView.statusText = "加载路网..."
             hudView.invalidate()
 
             Thread {
                 val result = RoadFetcher.fetch(lat, lng)
                 handler.post {
+                    if (result.status == FetchStatus.SUCCESS) {
+                        // 写入缓存
+                        RoadCache.put(lat, lng, result.segments)
+                    }
                     hudView.roads = result.segments
                     hudView.statusText = when (result.status) {
-                        FetchStatus.SUCCESS -> "路网: ${result.segments.size} 段"
+                        FetchStatus.SUCCESS -> "路网: ${result.segments.size} 段 (${RoadCache.stats()})"
                         FetchStatus.EMPTY -> "该区域无道路"
                         FetchStatus.ALL_FAILED -> "路网加载失败"
                         else -> result.message
@@ -255,6 +278,29 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 }
             }.start()
         }
+    }
+
+    /**
+     * 缓存命中后的后台静默刷新：不阻塞当前渲染，后台更新缓存
+     */
+    private fun silentBackgroundRefresh(lat: Double, lng: Double) {
+        Thread {
+            try {
+                val result = RoadFetcher.fetch(lat, lng)
+                if (result.status == FetchStatus.SUCCESS) {
+                    RoadCache.put(lat, lng, result.segments)
+                    handler.post {
+                        hudView.roads = result.segments
+                        hudView.statusText = "${RoadCache.stats()}"
+                        hudView.invalidate()
+                    }
+                }
+                // 定期清理过期缓存
+                RoadCache.cleanup()
+            } catch (e: Exception) {
+                Log.w("MainActivity", "静默刷新失败（不影响缓存）: ${e.message}")
+            }
+        }.start()
     }
 
     // === 磁力计 ===

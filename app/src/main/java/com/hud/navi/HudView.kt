@@ -267,7 +267,7 @@ class HudView @JvmOverloads constructor(
         val titleP = Paint(infoPaint).apply {
             textAlign = Paint.Align.RIGHT; textSize = 22f; color = Color.parseColor("#334455")
         }
-        canvas.drawText("HUD NAVI v4.2", w - 20f, 45f, titleP)
+        canvas.drawText("HUD NAVI v4.3", w - 20f, 45f, titleP)
 
         // 罗盘方位
         val dirs = arrayOf("N", "NE", "E", "SE", "S", "SW", "W", "NW")
