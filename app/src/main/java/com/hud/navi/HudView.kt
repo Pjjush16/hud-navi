@@ -115,7 +115,7 @@ class HudView @JvmOverloads constructor(
     private fun drawRoadNetwork(canvas: Canvas, w: Float, h: Float) {
         val cx = w / 2
         val cy = h * 0.92f  // 车辆在屏幕 92% 处（更靠底部，拉近摄像头）
-        val metersToPixels = w / 250f  // 250m = 屏幕宽度（拉近，原来 400m）
+        val metersToPixels = w / 50f  // 250m = 屏幕宽度（拉近，原来 400m）
 
         val bearingRad = Math.toRadians(vehicleBearing.toDouble()).toFloat()
 
@@ -268,7 +268,7 @@ class HudView @JvmOverloads constructor(
         val titleP = Paint(infoPaint).apply {
             textAlign = Paint.Align.RIGHT; textSize = 22f; color = Color.parseColor("#334455")
         }
-        canvas.drawText("HUD NAVI v4.4", w - 20f, 45f, titleP)
+        canvas.drawText("HUD NAVI v4.5", w - 20f, 45f, titleP)
 
         // 罗盘方位
         val dirs = arrayOf("N", "NE", "E", "SE", "S", "SW", "W", "NW")
