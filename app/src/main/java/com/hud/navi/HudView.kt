@@ -179,10 +179,10 @@ class HudView @JvmOverloads constructor(
 
             // 远处变细变暗（与 15° 透视匹配）
             val fade = (1f - avgD / (maxRenderDist * 1.2f)).coerceIn(0.1f, 1f)
-            // 15° 低视角：近处道路很粗，远处急剧变细（模拟真实透视）
-            val widthDepthScale = 5f  // 近距离衰减常数（越小近处越粗）
+            // 15° 低视角：近处道路较粗，远处平滑变细
+            val widthDepthScale = 15f  // 近距离衰减常数（适中，避免三角形畸变）
             val perspWidthScale = widthDepthScale / (avgD + widthDepthScale)
-            val widthScale = perspWidthScale.coerceIn(0.03f, 1f)
+            val widthScale = perspWidthScale.coerceIn(0.08f, 1f)
 
             // 单层白色细线渲染（手绘线稿风格）
             val lineWidth = baseW * widthScale
@@ -210,8 +210,8 @@ class HudView @JvmOverloads constructor(
         val dist = sqrt(rx * rx + ry * ry)
         if (dist > maxRenderDist) return null
 
-        // 灭点（地平线）位置
-        val vanishingY = h * 0.35f
+        // 灭点（地平线）位置 — 15°离地视角，地平线较低
+        val vanishingY = h * 0.25f
         // 从灭点到车辆的可用屏幕高度
         val usableH = cy - vanishingY
 
@@ -219,8 +219,8 @@ class HudView @JvmOverloads constructor(
         val fwd = ry.coerceAtLeast(0.1f)
 
         // 透视除法：1/d 映射
-        // depthScale=5 摄像机距离5m，近处道路极大，远处快速汇聚到灭点
-        val depthScale = 5f
+        // depthScale=80 控制透视压缩强度（越大越平缓，道路不变三角形）
+        val depthScale = 80f
         val t = fwd / (fwd + depthScale)  // 0→0, ∞→1
 
         // 屏幕 Y：cy（近）→ vanishingY（远）
