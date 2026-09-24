@@ -18,8 +18,13 @@ import androidx.core.app.ActivityCompat
 import kotlin.math.*
 
 /**
- * HUD 导航 v3.0 — 纯矢量路网 + 黑底 + 45° 透视
+ * HUD 导航 v4.0 — 纯矢量路网 + 黑底 + 45° 透视 + 插值平滑
  * 无任何瓦片地图，专为挡风玻璃 HUD 设计
+ *
+ * 插值引擎：
+ * - 位置：在两次 GPS 更新之间做线性插值，消除跳点
+ * - 方向：圆形插值（slerp），避免 359°→1° 走 180° 的问题
+ * - 渲染：60fps 定时器驱动，GPS 更新间隔内平滑过渡
  */
 class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener {
 
@@ -27,6 +32,36 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private lateinit var locationManager: LocationManager
     private lateinit var sensorManager: SensorManager
     private val handler = Handler(Looper.getMainLooper())
+
+    // === 插值引擎 ===
+    // 上一次 GPS 原始数据
+    private var prevLat = 0.0
+    private var prevLng = 0.0
+    private var prevBearing = 0f
+    private var prevSpeed = 0f
+    private var prevTime = 0L
+
+    // 最新一次 GPS 原始数据
+    private var currLat = 0.0
+    private var currLng = 0.0
+    private var currBearing = 0f
+    private var currSpeed = 0f
+    private var currTime = 0L
+
+    // 插值参数
+    private val INTERP_DURATION_MS = 800L  // 插值过渡时间（毫秒）
+    private val BEARING_SMOOTH_FACTOR = 0.15f  // 航向低通滤波系数（越小越平滑）
+
+    // 60fps 渲染循环
+    private val FRAME_INTERVAL_MS = 16L  // ~60fps
+    private val renderRunnable = object : Runnable {
+        override fun run() {
+            updateInterpolation()
+            hudView.invalidate()
+            handler.postDelayed(this, FRAME_INTERVAL_MS)
+        }
+    }
+    private var renderRunning = false
 
     // 路网刷新
     private var lastFetchLat = 0.0
@@ -105,27 +140,95 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     }
 
     override fun onLocationChanged(location: Location) {
+        val now = System.currentTimeMillis()
         val lat = location.latitude
         val lng = location.longitude
 
-        hudView.vehicleLat = lat
-        hudView.vehicleLng = lng
-        hudView.vehicleSpeed = location.speed * 3.6f
+        // 保存前一次作为插值起点
+        if (currLat != 0.0) {
+            prevLat = currLat
+            prevLng = currLng
+            prevBearing = currBearing
+            prevSpeed = currSpeed
+            prevTime = currTime
+        }
+
+        // 更新最新一次
+        currLat = lat
+        currLng = lng
+        currSpeed = location.speed * 3.6f
 
         // 航向：GPS bearing 优先，磁力计备用
-        val bearing = if (location.hasBearing() && location.speed > 1f) {
+        val rawBearing = if (location.hasBearing() && location.speed > 1f) {
             location.bearing
         } else if (hasCompass) {
             compassBearing
         } else {
             0f
         }
-        hudView.vehicleBearing = bearing
 
-        hudView.invalidate()
+        // 航向低通滤波（圆形平滑）
+        if (currLat == 0.0) {
+            currBearing = rawBearing
+        } else {
+            currBearing = circularLerp(currBearing, rawBearing, BEARING_SMOOTH_FACTOR)
+        }
+
+        currTime = now
+
+        // 如果是首次定位，立即设置
+        if (prevLat == 0.0) {
+            hudView.vehicleLat = lat
+            hudView.vehicleLng = lng
+            hudView.vehicleBearing = currBearing
+            hudView.vehicleSpeed = currSpeed
+        }
 
         // 路网刷新
         checkRoadRefresh(lat, lng)
+    }
+
+    /**
+     * 插值更新（每帧调用）
+     * 在两次 GPS 更新之间平滑过渡位置和方向
+     */
+    private fun updateInterpolation() {
+        if (currLat == 0.0) return
+
+        val now = System.currentTimeMillis()
+        val elapsed = now - currTime
+
+        if (prevLat == 0.0 || elapsed >= INTERP_DURATION_MS) {
+            // 没有前一次数据，或已超过插值窗口，直接用最新值
+            hudView.vehicleLat = currLat
+            hudView.vehicleLng = currLng
+            hudView.vehicleBearing = currBearing
+            hudView.vehicleSpeed = currSpeed
+        } else {
+            // 在插值窗口内，做平滑过渡
+            val t = (elapsed.toFloat() / INTERP_DURATION_MS).coerceIn(0f, 1f)
+            // 使用 easeOut 曲线让过渡更自然（开始快、结束慢）
+            val easedT = 1f - (1f - t) * (1f - t)
+
+            // 位置线性插值
+            hudView.vehicleLat = prevLat + (currLat - prevLat) * easedT
+            hudView.vehicleLng = prevLng + (currLng - prevLng) * easedT
+
+            // 方向圆形插值
+            hudView.vehicleBearing = circularLerp(prevBearing, currBearing, easedT)
+
+            // 速度线性插值
+            hudView.vehicleSpeed = prevSpeed + (currSpeed - prevSpeed) * easedT
+        }
+    }
+
+    /**
+     * 圆形插值（角度专用）
+     * 处理 359°→1° 不走 180° 的问题
+     */
+    private fun circularLerp(from: Float, to: Float, t: Float): Float {
+        var diff = ((to - from + 540f) % 360f) - 180f  // 归一化到 [-180, 180]
+        return (from + diff * t + 360f) % 360f
     }
 
     private fun checkRoadRefresh(lat: Double, lng: Double) {
@@ -175,10 +278,31 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         return R * 2 * atan2(sqrt(a), sqrt(1 - a))
     }
 
-    override fun onResume() { super.onResume() }
-    override fun onPause() { super.onPause() }
+    private fun startRenderLoop() {
+        if (!renderRunning) {
+            renderRunning = true
+            handler.post(renderRunnable)
+        }
+    }
+
+    private fun stopRenderLoop() {
+        renderRunning = false
+        handler.removeCallbacks(renderRunnable)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        startRenderLoop()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        stopRenderLoop()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
+        stopRenderLoop()
         locationManager.removeUpdates(this)
         sensorManager.unregisterListener(this)
         handler.removeCallbacksAndMessages(null)

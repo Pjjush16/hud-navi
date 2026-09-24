@@ -73,46 +73,17 @@ class HudView @JvmOverloads constructor(
         style = Paint.Style.STROKE; isAntiAlias = true
     }
 
-    // 道路颜色（明亮色彩，黑底高对比度）
-    // 主路（motorway/trunk）：绿色边线 + 黑色填充
-    // 非主路：蓝色系
-    private val roadColors = mapOf(
-        "motorway" to Color.parseColor("#00CC44"),
-        "motorway_link" to Color.parseColor("#00CC44"),
-        "trunk" to Color.parseColor("#00CC44"),
-        "trunk_link" to Color.parseColor("#00CC44"),
-        "primary" to Color.parseColor("#4488FF"),
-        "primary_link" to Color.parseColor("#4488FF"),
-        "secondary" to Color.parseColor("#4488FF"),
-        "secondary_link" to Color.parseColor("#4488FF"),
-        "tertiary" to Color.parseColor("#3366CC"),
-        "tertiary_link" to Color.parseColor("#3366CC"),
-        "residential" to Color.parseColor("#3355AA"),
-        "service" to Color.parseColor("#224488"),
-        "unclassified" to Color.parseColor("#3355AA"),
-        "living_street" to Color.parseColor("#3355AA"),
-        "road" to Color.parseColor("#3366CC")
-    )
+    // 道路宽度（按类型分级，白色统一）
     private val roadWidths = mapOf(
-        "motorway" to 8f, "motorway_link" to 6f,
-        "trunk" to 7f, "trunk_link" to 5f,
-        "primary" to 5f, "primary_link" to 3.5f,
-        "secondary" to 4.5f, "secondary_link" to 3f,
-        "tertiary" to 4f, "tertiary_link" to 2.5f,
-        "residential" to 3.5f, "service" to 2.5f,
-        "unclassified" to 2.5f, "living_street" to 2.5f,
-        "road" to 3.5f
+        "motorway" to 14f, "motorway_link" to 12f,
+        "trunk" to 13f, "trunk_link" to 11f,
+        "primary" to 11f, "primary_link" to 9f,
+        "secondary" to 10f, "secondary_link" to 8f,
+        "tertiary" to 9f, "tertiary_link" to 7f,
+        "residential" to 8f, "service" to 7f,
+        "unclassified" to 8f, "living_street" to 8f,
+        "road" to 8f
     )
-    // 主路类型集合（用于双线黑芯渲染）
-    private val majorRoadTypes = setOf("motorway", "motorway_link", "trunk", "trunk_link")
-
-    // 道路画笔
-    private val roadFillPaint = Paint().apply {
-        isAntiAlias = true; style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
-        color = Color.parseColor("#CC000000")
-    }
-
     // 透视参数
     private val maxRenderDist = 500f  // 最大渲染距离 500m
     private val perspectiveNear = 1.0f   // 近处缩放
@@ -184,34 +155,19 @@ class HudView @JvmOverloads constructor(
             val (sx1, sy1) = projectPoint(rx1, ry1, cx, cy, metersToPixels, w, h) ?: continue
             val (sx2, sy2) = projectPoint(rx2, ry2, cx, cy, metersToPixels, w, h) ?: continue
 
-            // 颜色和线宽
-            val color = roadColors[seg.highwayType] ?: roadColors["road"]!!
-            val baseW = roadWidths[seg.highwayType] ?: 2.5f
+            // 线宽（按道路类型）
+            val baseW = roadWidths[seg.highwayType] ?: 8f
             val avgD = (d1 + d2) / 2f
 
             // 远处变细变暗
             val fade = (1f - avgD / (maxRenderDist * 1.2f)).coerceIn(0.2f, 1f)
             val widthScale = (1f - avgD / (maxRenderDist * 1.5f)).coerceIn(0.3f, 1f)
 
-            // 主路：双线黑芯渲染（绿色底 + 黑色填充）
-            if (seg.highwayType in majorRoadTypes) {
-                // 第1层：绿色宽底
-                roadPaint.color = color
-                roadPaint.alpha = (fade * 230).toInt().coerceIn(50, 230)
-                roadPaint.strokeWidth = baseW * widthScale
-                canvas.drawLine(sx1, sy1, sx2, sy2, roadPaint)
-
-                // 第2层：黑色填充（宽度为绿色的 60%，形成两侧绿边+中间黑色效果）
-                roadFillPaint.alpha = (fade * 220).toInt().coerceIn(50, 220)
-                roadFillPaint.strokeWidth = baseW * widthScale * 0.6f
-                canvas.drawLine(sx1, sy1, sx2, sy2, roadFillPaint)
-            } else {
-                // 非主路：单层蓝色线
-                roadPaint.color = color
-                roadPaint.alpha = (fade * 230).toInt().coerceIn(50, 230)
-                roadPaint.strokeWidth = baseW * widthScale
-                canvas.drawLine(sx1, sy1, sx2, sy2, roadPaint)
-            }
+            // 所有道路统一白色粗线渲染
+            roadPaint.color = Color.WHITE
+            roadPaint.alpha = (fade * 240).toInt().coerceIn(60, 240)
+            roadPaint.strokeWidth = baseW * widthScale
+            canvas.drawLine(sx1, sy1, sx2, sy2, roadPaint)
         }
 
         canvas.restore()
