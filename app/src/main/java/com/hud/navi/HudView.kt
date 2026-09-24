@@ -84,16 +84,16 @@ class HudView @JvmOverloads constructor(
         strokeJoin = Paint.Join.ROUND
     }
 
-    // 道路宽度（15° 低视角，近处道路应很粗，模拟真实路面宽度）
+    // 道路宽度（极简HUD风格，道路非常粗，模拟真实道路宽度）
     private val roadWidths = mapOf(
-        "motorway" to 60f, "motorway_link" to 50f,
-        "trunk" to 55f, "trunk_link" to 45f,
-        "primary" to 45f, "primary_link" to 38f,
-        "secondary" to 40f, "secondary_link" to 32f,
-        "tertiary" to 36f, "tertiary_link" to 28f,
-        "residential" to 30f, "service" to 25f,
-        "unclassified" to 30f, "living_street" to 30f,
-        "road" to 30f
+        "motorway" to 200f, "motorway_link" to 160f,
+        "trunk" to 180f, "trunk_link" to 140f,
+        "primary" to 150f, "primary_link" to 120f,
+        "secondary" to 130f, "secondary_link" to 100f,
+        "tertiary" to 110f, "tertiary_link" to 80f,
+        "residential" to 90f, "service" to 70f,
+        "unclassified" to 90f, "living_street" to 90f,
+        "road" to 90f
     )
     // 透视参数（15° 从地面 / 75° 从正上方）
     // 摄像头几乎平视前方，像真车挡风玻璃 HUD
@@ -276,38 +276,20 @@ class HudView @JvmOverloads constructor(
     }
 
     /**
-     * HUD 信息覆盖层
+     * HUD 信息覆盖层 — 极简模式：只显示速度
      */
     private fun drawHudInfo(canvas: Canvas, w: Float, h: Float) {
-        // 速度（左下角）
-        val speedStr = vehicleSpeed.toInt().toString()
-        canvas.drawText(speedStr, 40f, h - 30f, speedPaint)
-        canvas.drawText("km/h", 40f + speedPaint.measureText(speedStr) + 8f, h - 40f, unitPaint)
-
-        // 状态信息（左上角）
         if (vehicleLat == 0.0) {
-            canvas.drawText("等待 GPS 定位...", 30f, 55f, statusPaint)
-        } else {
-            val roadCount = roads.size
-            val status = if (roadCount > 0) "路网: $roadCount 段" else statusText
-            val paint = if (statusText.contains("失败") || statusText.contains("错误")) statusPaint else infoPaint
-            canvas.drawText(status, 30f, 55f, paint)
-            canvas.drawText(String.format("%.4f, %.4f", vehicleLat, vehicleLng), 30f, 90f, infoPaint)
-            canvas.drawText(String.format("航向 %.0f°", vehicleBearing), 30f, 125f, infoPaint)
+            // 未定位时显示提示
+            canvas.drawText("等待 GPS...", w / 2, h / 2, statusPaint.apply { textAlign = Paint.Align.CENTER })
+            return
         }
 
-        // 右上角版本号
-        val titleP = Paint(infoPaint).apply {
-            textAlign = Paint.Align.RIGHT; textSize = 22f; color = Color.parseColor("#334455")
-        }
-        canvas.drawText("HUD NAVI v4.8", w - 20f, 45f, titleP)
-
-        // 罗盘方位
-        val dirs = arrayOf("N", "NE", "E", "SE", "S", "SW", "W", "NW")
-        val idx = (((vehicleBearing + 22.5f) % 360f) / 45f).toInt() % 8
-        val compassP = Paint(infoPaint).apply {
-            textAlign = Paint.Align.RIGHT; textSize = 28f; color = Color.parseColor("#556677")
-        }
-        canvas.drawText(dirs[idx], w - 20f, 80f, compassP)
+        // 速度数字（右侧居中偏下，参考草图布局）
+        val speedStr = vehicleSpeed.toInt().toString()
+        val speedX = w * 0.78f
+        val speedY = h * 0.85f
+        canvas.drawText(speedStr, speedX, speedY, speedPaint)
+        canvas.drawText("km/h", speedX, speedY + 36f, unitPaint)
     }
 }
