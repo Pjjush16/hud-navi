@@ -96,7 +96,7 @@ class HudView @JvmOverloads constructor(
         "road" to 12f
     )
     // 视觉宽度倍率：让道路在屏幕上更粗（3倍放大）
-    private val roadVisualScale = 3.0f
+    private val roadVisualScale = 0.4f
     // 透视参数（15° 从地面 / 75° 从正上方）
     // 摄像头几乎平视前方，像真车挡风玻璃 HUD
     private val maxRenderDist = 500f  // 最大渲染距离 500m
@@ -184,20 +184,12 @@ class HudView @JvmOverloads constructor(
             val perspWidthScale = widthDepthScale / (avgD + widthDepthScale)
             val widthScale = perspWidthScale.coerceIn(0.03f, 1f)
 
-            // 所有道路统一双线渲染：先画白色粗线（边线），再叠加黑色细线（填充）
-            val outerW = baseW * 1.8f * widthScale  // 白色边线宽度
-            val innerW = baseW * 0.55f * widthScale  // 黑色填充宽度
+            // 单层白色细线渲染（手绘线稿风格）
+            val lineWidth = baseW * widthScale
 
-            // 第一层：白色边线
             roadPaint.color = Color.WHITE
-            roadPaint.alpha = (fade * 220).toInt().coerceIn(50, 220)
-            roadPaint.strokeWidth = outerW
-            canvas.drawLine(sx1, sy1, sx2, sy2, roadPaint)
-
-            // 第二层：黑色填充（叠加在白色上面，形成两侧白边+中间黑色）
-            roadPaint.color = Color.BLACK
-            roadPaint.alpha = 255
-            roadPaint.strokeWidth = innerW
+            roadPaint.alpha = (fade * 255).toInt().coerceIn(80, 255)
+            roadPaint.strokeWidth = lineWidth
             canvas.drawLine(sx1, sy1, sx2, sy2, roadPaint)
         }
 
