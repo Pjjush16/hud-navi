@@ -84,17 +84,19 @@ class HudView @JvmOverloads constructor(
         strokeJoin = Paint.Join.ROUND
     }
 
-    // 道路宽度（极简HUD风格，道路非常粗，模拟真实道路宽度）
-    private val roadWidths = mapOf(
-        "motorway" to 200f, "motorway_link" to 160f,
-        "trunk" to 180f, "trunk_link" to 140f,
-        "primary" to 150f, "primary_link" to 120f,
-        "secondary" to 130f, "secondary_link" to 100f,
-        "tertiary" to 110f, "tertiary_link" to 80f,
-        "residential" to 90f, "service" to 70f,
-        "unclassified" to 90f, "living_street" to 90f,
-        "road" to 90f
+    // 道路宽度（米）— 真实道路宽度，渲染时乘以透视系数
+    private val roadWidthsMeters = mapOf(
+        "motorway" to 35f, "motorway_link" to 25f,
+        "trunk" to 30f, "trunk_link" to 22f,
+        "primary" to 25f, "primary_link" to 18f,
+        "secondary" to 20f, "secondary_link" to 15f,
+        "tertiary" to 15f, "tertiary_link" to 12f,
+        "residential" to 12f, "service" to 8f,
+        "unclassified" to 10f, "living_street" to 10f,
+        "road" to 12f
     )
+    // 视觉宽度倍率：让道路在屏幕上更粗（3倍放大）
+    private val roadVisualScale = 3.0f
     // 透视参数（15° 从地面 / 75° 从正上方）
     // 摄像头几乎平视前方，像真车挡风玻璃 HUD
     private val maxRenderDist = 500f  // 最大渲染距离 500m
@@ -168,16 +170,19 @@ class HudView @JvmOverloads constructor(
             val (sx1, sy1) = projectPoint(rx1, ry1, cx, cy, metersToPixels, w, h) ?: continue
             val (sx2, sy2) = projectPoint(rx2, ry2, cx, cy, metersToPixels, w, h) ?: continue
 
-            // 线宽（按道路类型）
-            val baseW = roadWidths[seg.highwayType] ?: 8f
+            // 线宽：优先用 API 返回的实际宽度(米)，否则按道路类型默认宽度
+            val baseWidthM = if (seg.widthMeters > 0f) seg.widthMeters
+                else (roadWidthsMeters[seg.highwayType] ?: 12f)
+            // 米 → 像素，乘以视觉放大倍率
+            val baseW = baseWidthM * metersToPixels * roadVisualScale
             val avgD = (d1 + d2) / 2f
 
             // 远处变细变暗（与 15° 透视匹配）
-            val fade = (1f - avgD / (maxRenderDist * 1.2f)).coerceIn(0.15f, 1f)
+            val fade = (1f - avgD / (maxRenderDist * 1.2f)).coerceIn(0.1f, 1f)
             // 15° 低视角：近处道路很粗，远处急剧变细（模拟真实透视）
-            val widthDepthScale = 8f  // 近距离衰减常数（越小近处越粗）
+            val widthDepthScale = 5f  // 近距离衰减常数（越小近处越粗）
             val perspWidthScale = widthDepthScale / (avgD + widthDepthScale)
-            val widthScale = perspWidthScale.coerceIn(0.05f, 1f)
+            val widthScale = perspWidthScale.coerceIn(0.03f, 1f)
 
             // 所有道路统一双线渲染：先画白色粗线（边线），再叠加黑色细线（填充）
             val outerW = baseW * 1.8f * widthScale  // 白色边线宽度

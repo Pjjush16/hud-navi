@@ -193,6 +193,7 @@ object RoadCache {
                             put("lat1", seg.lat1); put("lng1", seg.lng1)
                             put("lat2", seg.lat2); put("lng2", seg.lng2)
                             put("type", seg.highwayType)
+                            put("w", seg.widthMeters)
                         })
                     }
                     put("segs", segs)
@@ -225,7 +226,8 @@ object RoadCache {
                     segs.add(RoadSegment(
                         s.getDouble("lat1"), s.getDouble("lng1"),
                         s.getDouble("lat2"), s.getDouble("lng2"),
-                        s.getString("type")
+                        s.getString("type"),
+                        s.optDouble("w", -1.0).toFloat()
                     ))
                 }
                 cache[key] = CacheEntry(segs, ts, lat, lng)

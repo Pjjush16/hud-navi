@@ -11,12 +11,13 @@ import kotlin.math.sqrt
 import kotlin.math.atan2
 
 /**
- * 路网数据段：两个端点的经纬度 + 道路类型
+ * 路网数据段：两个端点的经纬度 + 道路类型 + 实际宽度(米)
  */
 data class RoadSegment(
     val lat1: Double, val lng1: Double,
     val lat2: Double, val lng2: Double,
-    val highwayType: String
+    val highwayType: String,
+    val widthMeters: Float = -1f  // -1 = 未知，用类型默认值
 )
 
 /**
@@ -170,6 +171,9 @@ object RoadFetcher {
                 val tags = way.optJSONObject("tags")
                 val highwayType = tags?.optString("highway", "road") ?: "road"
 
+                // 解析实际宽度（米）：优先用 width 标签，其次用 lanes 估算
+                val widthMeters = parseWidth(tags)
+
                 val geometry = way.optJSONArray("geometry") ?: continue
                 for (j in 0 until geometry.length() - 1) {
                     val p1 = geometry.getJSONObject(j)
@@ -178,7 +182,8 @@ object RoadFetcher {
                         RoadSegment(
                             p1.getDouble("lat"), p1.getDouble("lon"),
                             p2.getDouble("lat"), p2.getDouble("lon"),
-                            highwayType
+                            highwayType,
+                            widthMeters
                         )
                     )
                 }
@@ -190,6 +195,33 @@ object RoadFetcher {
 
         val status = if (segments.isEmpty()) FetchStatus.EMPTY else FetchStatus.SUCCESS
         return FetchResult(segments, status, "${segments.size} 段道路")
+    }
+
+    /**
+     * 解析道路宽度（米）：优先 width 标签，其次 lanes × 3.5m
+     */
+    private fun parseWidth(tags: JSONObject?): Float {
+        if (tags == null) return -1f
+
+        // 1. 直接用 width 标签
+        val widthStr = tags.optString("width", "")
+        if (widthStr.isNotEmpty()) {
+            try {
+                val w = widthStr.replace(",", ".").toFloat()
+                if (w in 1f..100f) return w
+            } catch (_: NumberFormatException) {}
+        }
+
+        // 2. 用 lanes 估算（每车道 3.5m + 路肩 2m）
+        val lanesStr = tags.optString("lanes", "")
+        if (lanesStr.isNotEmpty()) {
+            try {
+                val lanes = lanesStr.toInt()
+                if (lanes in 1..12) return lanes * 3.5f + 2f
+            } catch (_: NumberFormatException) {}
+        }
+
+        return -1f  // 未知
     }
 
     /**
