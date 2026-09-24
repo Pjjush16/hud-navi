@@ -72,6 +72,17 @@ class HudView @JvmOverloads constructor(
         color = Color.parseColor("#112233"); strokeWidth = 1f
         style = Paint.Style.STROKE; isAntiAlias = true
     }
+    // 飞镖箭头 — 白色填充
+    private val dartFillPaint = Paint().apply {
+        color = Color.WHITE; style = Paint.Style.FILL
+        isAntiAlias = true
+    }
+    // 飞镖箭头 — 白色边线（轮廓增强）
+    private val dartStrokePaint = Paint().apply {
+        color = Color.WHITE; style = Paint.Style.STROKE
+        strokeWidth = 2f; isAntiAlias = true
+        strokeJoin = Paint.Join.ROUND
+    }
 
     // 道路宽度（按类型分级，白色统一）
     private val roadWidths = mapOf(
@@ -229,28 +240,37 @@ class HudView @JvmOverloads constructor(
     }
 
     /**
-     * 车辆位置标记（屏幕底部中心）
+     * 车辆位置标记 — 飞镖/纸飞机形箭头（屏幕底部中心）
+     * 三角形头部 + 内凹尾部，白色填充，方向朝上（前方）
      */
     private fun drawVehicleMarker(canvas: Canvas, w: Float, h: Float) {
         val cx = w / 2
         val cy = h * 0.92f
 
-        // 绿色外圈
-        canvas.drawCircle(cx, cy, 18f, ringPaint)
-        // 白色内点
-        canvas.drawCircle(cx, cy, 5f, dotPaint)
+        // 飞镖形状参数
+        val size = 28f          // 整体大小
+        val tipY = cy - size * 1.4f    // 箭头尖端（前方/上方）
+        val shoulderY = cy + size * 0.3f  // 肩部（最宽处）
+        val tailY = cy + size * 0.8f   // 尾部
+        val indentY = cy               // 内凹点（尾部中间的凹陷）
+        val halfW = size * 0.55f       // 半宽
 
-        // 前方方向线
-        val lineLen = 50f
-        canvas.drawLine(cx, cy, cx, cy - lineLen, ringPaint)
+        // 飞镖路径：尖端 → 左肩 → 左尾 → 内凹 → 右尾 → 右肩 → 尖端
+        val dartPath = Path().apply {
+            moveTo(cx, tipY)                          // 尖端
+            lineTo(cx - halfW, shoulderY)             // 左肩
+            lineTo(cx - halfW * 0.4f, tailY)          // 左尾
+            lineTo(cx, indentY)                       // 内凹中点
+            lineTo(cx + halfW * 0.4f, tailY)          // 右尾
+            lineTo(cx + halfW, shoulderY)             // 右肩
+            close()
+        }
 
-        // 小三角箭头
-        val arrowPath = Path()
-        arrowPath.moveTo(cx, cy - lineLen - 12f)
-        arrowPath.lineTo(cx - 8f, cy - lineLen + 2f)
-        arrowPath.lineTo(cx + 8f, cy - lineLen + 2f)
-        arrowPath.close()
-        canvas.drawPath(arrowPath, arrowPaint)
+        // 白色填充
+        canvas.drawPath(dartPath, dartFillPaint)
+
+        // 细白边线（增加轮廓感）
+        canvas.drawPath(dartPath, dartStrokePaint)
     }
 
     /**
@@ -278,7 +298,7 @@ class HudView @JvmOverloads constructor(
         val titleP = Paint(infoPaint).apply {
             textAlign = Paint.Align.RIGHT; textSize = 22f; color = Color.parseColor("#334455")
         }
-        canvas.drawText("HUD NAVI v4.6", w - 20f, 45f, titleP)
+        canvas.drawText("HUD NAVI v4.7", w - 20f, 45f, titleP)
 
         // 罗盘方位
         val dirs = arrayOf("N", "NE", "E", "SE", "S", "SW", "W", "NW")
