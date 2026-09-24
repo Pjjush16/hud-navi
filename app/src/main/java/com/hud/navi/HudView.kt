@@ -281,14 +281,30 @@ class HudView @JvmOverloads constructor(
     private fun drawHudInfo(canvas: Canvas, w: Float, h: Float) {
         if (vehicleLat == 0.0) {
             // 未定位时显示提示
-            canvas.drawText("等待 GPS...", w / 2, h / 2, statusPaint.apply { textAlign = Paint.Align.CENTER })
+            val paint = Paint(statusPaint).apply { textAlign = Paint.Align.CENTER }
+            canvas.drawText("等待 GPS...", w / 2, h / 2, paint)
             return
         }
 
-        // 速度数字（右侧居中偏下，参考草图布局）
+        // 速度数字（屏幕顶部居中，大字体）
         val speedStr = vehicleSpeed.toInt().toString()
-        val speedX = w * 0.78f
-        val speedY = h * 0.85f
+        val speedX = w / 2
+        val speedY = 100f  // 屏幕顶部
+        val speedPaint = Paint().apply {
+            color = Color.WHITE
+            textSize = 80f
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            isAntiAlias = true
+            isFakeBoldText = true
+            textAlign = Paint.Align.CENTER
+        }
+        val unitPaint = Paint().apply {
+            color = Color.parseColor("#888888")
+            textSize = 28f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            isAntiAlias = true
+            textAlign = Paint.Align.CENTER
+        }
         canvas.drawText(speedStr, speedX, speedY, speedPaint)
         canvas.drawText("km/h", speedX, speedY + 36f, unitPaint)
     }
