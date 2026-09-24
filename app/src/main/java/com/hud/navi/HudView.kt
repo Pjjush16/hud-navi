@@ -163,10 +163,20 @@ class HudView @JvmOverloads constructor(
             val fade = (1f - avgD / (maxRenderDist * 1.2f)).coerceIn(0.2f, 1f)
             val widthScale = (1f - avgD / (maxRenderDist * 1.5f)).coerceIn(0.3f, 1f)
 
-            // 所有道路统一白色粗线渲染
+            // 所有道路统一双线渲染：先画白色粗线（边线），再叠加黑色细线（填充）
+            val outerW = baseW * 1.8f * widthScale  // 白色边线宽度
+            val innerW = baseW * 0.55f * widthScale  // 黑色填充宽度
+
+            // 第一层：白色边线
             roadPaint.color = Color.WHITE
-            roadPaint.alpha = (fade * 240).toInt().coerceIn(60, 240)
-            roadPaint.strokeWidth = baseW * widthScale
+            roadPaint.alpha = (fade * 220).toInt().coerceIn(50, 220)
+            roadPaint.strokeWidth = outerW
+            canvas.drawLine(sx1, sy1, sx2, sy2, roadPaint)
+
+            // 第二层：黑色填充（叠加在白色上面，形成两侧白边+中间黑色）
+            roadPaint.color = Color.BLACK
+            roadPaint.alpha = 255
+            roadPaint.strokeWidth = innerW
             canvas.drawLine(sx1, sy1, sx2, sy2, roadPaint)
         }
 
@@ -257,7 +267,7 @@ class HudView @JvmOverloads constructor(
         val titleP = Paint(infoPaint).apply {
             textAlign = Paint.Align.RIGHT; textSize = 22f; color = Color.parseColor("#334455")
         }
-        canvas.drawText("HUD NAVI v3.0", w - 20f, 45f, titleP)
+        canvas.drawText("HUD NAVI v4.2", w - 20f, 45f, titleP)
 
         // 罗盘方位
         val dirs = arrayOf("N", "NE", "E", "SE", "S", "SW", "W", "NW")
