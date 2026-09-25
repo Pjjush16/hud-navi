@@ -32,14 +32,14 @@ import kotlinx.coroutines.launch
 import kotlin.math.*
 
 /**
- * HUD 导航 v8.1 — 极简 HUD + GPS 抗跳变
+ * HUD 导航 v8.2 — 极简 HUD + GPS 抗跳变 + 速度分级吸附
  *
- * v8.0 → v8.1:
- * - 卡尔曼滤波：lat/lng 独立 1D Kalman，平滑噪声
- * - 最小位移阈值：< 3m 视为静止抖动，不更新位置
- * - 异常点剔除：隐含速度 > 300km/h 的跳点直接丢弃
- * - 速度 EMA 平滑：防止速度突变
- * - GPS accuracy 加权：精度差时降低卡尔曼增益
+ * v8.1 → v8.2:
+ * - 速度分级吸附策略：
+ *   0–5 km/h：不吸附（可能静止/倒车/停车调整）
+ *   5–15 km/h：弱吸附（GPS 漂移明显，不能强行贴路），阈值 30m，混合 30%
+ *   15–30 km/h：中等吸附（有方向趋势），阈值 25m，混合 60%
+ *   30+ km/h：正常吸附（运动方向稳定），阈值 20m，混合 100%
  */
 class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener {
 
@@ -95,7 +95,64 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         private const val TAG = "HudNavi"
         private const val ROAD_FETCH_DIST = 150.0
         private const val ROAD_FETCH_INTERVAL = 5000L
-        private const val SNAP_THRESHOLD_M = 20.0  // 道路吸附距离阈值（米）
+    }
+
+    // === 速度分级吸附参数 ===
+    // (阈值 m, 混合比例 0~1)
+    private fun getSnapParams(speedKmh: Float): Pair<Double, Double> {
+        return when {
+            speedKmh < 5f  -> Pair(0.0, 0.0)     // 0–5: 不吸附
+            speedKmh < 15f -> Pair(30.0, 0.3)     // 5–15: 弱吸附（30m 内，仅偏移 30%）
+            speedKmh < 30f -> Pair(25.0, 0.6)     // 15–30: 中等吸附
+            else           -> Pair(20.0, 1.0)     // 30+: 正常吸附
+        }
+    }
+
+    /**
+     * 速度分级道路吸附
+     * @return 吸附后的 (lat, lng)，null 表示不吸附
+     */
+    private fun snapToRoadSpeedAware(lat: Double, lng: Double, speedKmh: Float): Pair<Double, Double>? {
+        if (!hudView.hasRoads) return null
+        val (threshold, blendRatio) = getSnapParams(speedKmh)
+        if (threshold <= 0.0) return null  // 0–5 km/h: 不吸附
+
+        var minDist = Double.MAX_VALUE
+        var bestLat = lat
+        var bestLng = lng
+
+        for (segment in hudView.roadSegments) {
+            val points = segment.points
+            for (i in 0 until points.size - 1) {
+                val (lat1, lng1) = points[i]
+                val (lat2, lng2) = points[i + 1]
+
+                val dx = lng2 - lng1
+                val dy = lat2 - lat1
+                val lenSq = dx * dx + dy * dy
+                if (lenSq < 1e-12) continue
+
+                val t = ((lng - lng1) * dx + (lat - lat1) * dy) / lenSq
+                val clampedT = t.coerceIn(0.0, 1.0)
+
+                val projLat = lat1 + clampedT * dy
+                val projLng = lng1 + clampedT * dx
+
+                val dist = RoadFetcher.haversine(lat, lng, projLat, projLng)
+                if (dist < minDist) {
+                    minDist = dist
+                    bestLat = projLat
+                    bestLng = projLng
+                }
+            }
+        }
+
+        if (minDist > threshold) return null
+
+        // 混合吸附：blendRatio=1.0 完全贴路，blendRatio=0.3 只修正 30%
+        val snappedLat = lat + (bestLat - lat) * blendRatio
+        val snappedLng = lng + (bestLng - lng) * blendRatio
+        return Pair(snappedLat, snappedLng)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -237,47 +294,6 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         }
     }
 
-    /**
-     * 道路吸附：找到最近的道路段，将车辆位置投影到该段上
-     */
-    private fun snapToRoad(lat: Double, lng: Double): Pair<Double, Double>? {
-        if (!hudView.hasRoads) return null
-
-        var minDist = Double.MAX_VALUE
-        var bestLat = lat
-        var bestLng = lng
-
-        // 遍历所有路段，找最近点
-        for (segment in hudView.roadSegments) {
-            val points = segment.points
-            for (i in 0 until points.size - 1) {
-                val (lat1, lng1) = points[i]
-                val (lat2, lng2) = points[i + 1]
-
-                // 计算点到线段的投影
-                val dx = lng2 - lng1
-                val dy = lat2 - lat1
-                val lenSq = dx * dx + dy * dy
-                if (lenSq < 1e-12) continue
-
-                val t = ((lng - lng1) * dx + (lat - lat1) * dy) / lenSq
-                val clampedT = t.coerceIn(0.0, 1.0)
-
-                val projLat = lat1 + clampedT * dy
-                val projLng = lng1 + clampedT * dx
-
-                val dist = RoadFetcher.haversine(lat, lng, projLat, projLng)
-                if (dist < minDist) {
-                    minDist = dist
-                    bestLat = projLat
-                    bestLng = projLng
-                }
-            }
-        }
-
-        return if (minDist <= SNAP_THRESHOLD_M) Pair(bestLat, bestLng) else null
-    }
-
     // === 60fps 渲染 ===
     private fun updateFrame() {
         if (currLat == 0.0) return
@@ -295,8 +311,8 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             )
         }
 
-        // 道路吸附
-        val snapped = snapToRoad(iLat, iLng)
+        // 速度分级道路吸附
+        val snapped = snapToRoadSpeedAware(iLat, iLng, currSpeed)
         if (snapped != null) {
             hudView.snappedLat = snapped.first
             hudView.snappedLng = snapped.second
