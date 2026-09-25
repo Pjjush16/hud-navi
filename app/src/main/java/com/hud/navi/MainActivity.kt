@@ -114,6 +114,25 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private val smoothedWorldAcc = FloatArray(3) // 平滑后的世界加速度
     private val ACC_SMOOTH = 0.15f               // 加速度 EMA 平滑系数
 
+    // === 陀螺仪（精确角速度，用于 EKF 航向积分） ===
+    private var hasGyro = false
+    private val gyroData = FloatArray(3)         // 原始角速度 (rad/s)
+    private var gyroHeadingRate = 0f             // 偏航角速度 (deg/s)
+    private var gyroHeadingRateSmooth = 0f       // EMA 平滑后的偏航角速度
+    private val GYRO_SMOOTH = 0.3f               // 陀螺仪 EMA 平滑系数
+    private var lastGyroTime = 0L
+
+    // === 旋转矢量（Android 9 轴融合：陀螺 + 加速 + 磁力） ===
+    private var hasRotationVector = false
+    private var rvHeading = 0f                   // 旋转矢量给出的航向 (deg)
+    private var rvHeadingSmooth = 0f             // EMA 平滑
+    private var rvInitialized = false
+
+    // === 气压计（海拔高度） ===
+    private var hasBarometer = false
+    private var pressureAltitude = Float.NaN     // 气压海拔高度 (m)
+    private var baseAltitude = Float.NaN         // 首次气压读数对应的海拔（用于相对高度校正）
+
     // === 状态 ===
     private var gpsFixCount = 0
     private var lastGpsTime = 0L
@@ -470,14 +489,37 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         locationManager.getProvider(LocationManager.NETWORK_PROVIDER)?.let {
             locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 1000L, 5f, this)
         }
+        // 基础传感器：磁力计 + 加速度计
         val mag = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
         val acc = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-        val linAcc = sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
         if (mag != null && acc != null) {
             sensorManager.registerListener(this, mag, SensorManager.SENSOR_DELAY_GAME)
             sensorManager.registerListener(this, acc, SensorManager.SENSOR_DELAY_GAME)
             hasCompass = true
         }
+        // 陀螺仪：精确角速度，用于 EKF 航向积分（高德核心传感器之一）
+        val gyro = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+        if (gyro != null) {
+            sensorManager.registerListener(this, gyro, SensorManager.SENSOR_DELAY_GAME)
+            hasGyro = true
+            Log.i(TAG, "Gyroscope registered")
+        }
+        // 旋转矢量：Android 9轴融合（陀螺+加速+磁力），比纯磁力计稳定得多
+        val rv = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+        if (rv != null) {
+            sensorManager.registerListener(this, rv, SensorManager.SENSOR_DELAY_GAME)
+            hasRotationVector = true
+            Log.i(TAG, "Rotation vector registered")
+        }
+        // 气压计：海拔高度
+        val baro = sensorManager.getDefaultSensor(Sensor.TYPE_PRESSURE)
+        if (baro != null) {
+            sensorManager.registerListener(this, baro, SensorManager.SENSOR_DELAY_NORMAL)
+            hasBarometer = true
+            Log.i(TAG, "Barometer registered")
+        }
+        // 线性加速度（已去除重力）
+        val linAcc = sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
         linAcc?.let {
             sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
         }
@@ -580,7 +622,10 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         vehicleLat = ekf.lat
         vehicleLng = ekf.lng
 
-        // ── 方向处理（纯 GPS 航向 + 死区 + 路口分支锁定） ──
+        // ── 方向处理（多源融合：GPS + 陀螺仪积分 + 旋转矢量） ──
+        val gyroActive = hasGyro && (System.currentTimeMillis() - lastGyroTime) < 500
+        val dtSec = dt / 1000.0
+
         val newBearing = when {
             // 在路口且匹配到分支 → 优先跟随分支朝向
             nearIntersection && !matchedBranchHeading.isNaN() -> {
@@ -591,10 +636,21 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             // GPS 有航向且速度足够 → 用 GPS 航向 + 死区过滤
             targetSpeed > 1f -> {
                 val diff = ((targetBearing - vehicleBearing + 540f) % 360f) - 180f
-                if (abs(diff) < HEADING_DEAD_ZONE) vehicleBearing  // 死区内：不动
-                else vehicleBearing + diff * 0.5f  // 死区外：半速过渡
+                if (abs(diff) < HEADING_DEAD_ZONE) vehicleBearing
+                else vehicleBearing + diff * 0.5f
             }
-            // 低速/静止 → 保持上次航向
+            // GPS 无航向但有陀螺仪 → 用陀螺仪角速度积分推算航向
+            gyroActive && abs(gyroHeadingRateSmooth) > 0.5f -> {
+                // 陀螺仪积分：heading += rate * dt
+                vehicleBearing + gyroHeadingRateSmooth * dtSec.toFloat()
+            }
+            // 低速/静止但有旋转矢量 → 缓慢跟随旋转矢量航向
+            hasRotationVector && rvInitialized -> {
+                val diff = ((rvHeadingSmooth - vehicleBearing + 540f) % 360f) - 180f
+                if (abs(diff) < HEADING_DEAD_ZONE) vehicleBearing
+                else vehicleBearing + diff * 0.1f  // 非常缓慢跟随，避免低速抖动
+            }
+            // 都没有 → 保持上次航向
             else -> vehicleBearing
         }
         vehicleBearing = ((newBearing % 360f) + 360f) % 360f
@@ -630,7 +686,14 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
         hudView.vehicleBearing = vehicleBearing
         hudView.vehicleSpeed = (ekf.speed * 3.6).toFloat()  // m/s → km/h，用 EKF 积分速度
-        hudView.statusText = ekf.getStatusString()
+        // 状态栏：EKF 状态 + 活跃传感器
+        val sensors = buildString {
+            append("GPS")
+            if (hasGyro) append("+Gyro")
+            if (hasRotationVector) append("+RV")
+            if (hasBarometer) append("+Baro")
+        }
+        hudView.statusText = "${ekf.getStatusString()} [$sensors]"
         hudView.invalidate()
     }
 
@@ -823,6 +886,48 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             Sensor.TYPE_MAGNETIC_FIELD -> {
                 System.arraycopy(event.values, 0, magData, 0, 3)
             }
+            Sensor.TYPE_GYROSCOPE -> {
+                // 陀螺仪：精确角速度（rad/s）
+                // Z轴 = 偏航角速度（绕竖直轴旋转）→ 直接积分得航向变化
+                System.arraycopy(event.values, 0, gyroData, 0, 3)
+                // Z轴角速度 (rad/s) → deg/s，负号因为 Android Z轴朝上、逆时针为正
+                val rawRate = -Math.toDegrees(event.values[2].toDouble()).toFloat()
+                gyroHeadingRate = rawRate
+                // EMA 平滑
+                gyroHeadingRateSmooth += GYRO_SMOOTH * (rawRate - gyroHeadingRateSmooth)
+                lastGyroTime = System.currentTimeMillis()
+            }
+            Sensor.TYPE_ROTATION_VECTOR -> {
+                // 旋转矢量：Android 9轴融合（陀螺+加速+磁力）
+                // 输出四元数，转换为航向角
+                val rotMat = FloatArray(9)
+                SensorManager.getRotationMatrixFromVector(rotMat, event.values)
+                val orientation = FloatArray(3)
+                SensorManager.getOrientation(rotMat, orientation)
+                val rawHeading = ((Math.toDegrees(orientation[0].toDouble()).toFloat() + 360f) % 360f)
+
+                rvHeading = rawHeading
+                if (!rvInitialized) {
+                    rvHeadingSmooth = rawHeading
+                    rvInitialized = true
+                } else {
+                    // 圆形 EMA 平滑
+                    val diff = ((rawHeading - rvHeadingSmooth + 540f) % 360f) - 180f
+                    rvHeadingSmooth = ((rvHeadingSmooth + 0.15f * diff) + 360f) % 360f
+                }
+            }
+            Sensor.TYPE_PRESSURE -> {
+                // 气压计：气压 → 海拔高度（米）
+                // SensorManager.getAltitude(PRESSURE_STANDARD_ATMOSPHERE, pressure) 返回海拔
+                val pressure = event.values[0]
+                pressureAltitude = SensorManager.getAltitude(SensorManager.PRESSURE_STANDARD_ATMOSPHERE, pressure)
+                // 首次读数作为基准
+                if (baseAltitude.isNaN()) {
+                    baseAltitude = pressureAltitude
+                }
+                // 传递给 HudView 显示
+                hudView.altitude = pressureAltitude
+            }
             Sensor.TYPE_LINEAR_ACCELERATION -> {
                 // 线性加速度（已去除重力），旋转到世界坐标系
                 val R = FloatArray(9)
@@ -850,15 +955,13 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             val rawBearing = ((Math.toDegrees(o[0].toDouble()).toFloat() + 360f) % 360f)
 
             if (!compassInitialized) {
-                // 首次：直接赋值，不滤波
                 smoothedCompassBearing = rawBearing
                 compassInitialized = true
             } else {
-                // 圆形 EMA：处理 359°→1° 跨越
                 val diff = ((rawBearing - smoothedCompassBearing + 540f) % 360f) - 180f
                 smoothedCompassBearing = ((smoothedCompassBearing + COMPASS_EMA_ALPHA * diff) + 360f) % 360f
             }
-            compassBearing = rawBearing  // 保留原始值供调试，实际使用 smoothedCompassBearing
+            compassBearing = rawBearing
         }
     }
 

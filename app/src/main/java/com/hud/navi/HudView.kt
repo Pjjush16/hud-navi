@@ -42,7 +42,8 @@ class HudView @JvmOverloads constructor(
     var vehicleLat: Double = 0.0
     var vehicleLng: Double = 0.0
     var vehicleBearing: Float = 0f
-    var vehicleSpeed: Float = 0f     // km/h（原始 GPS 速度）
+    var vehicleSpeed: Float = 0f     // km/h
+    var altitude: Float = Float.NaN  // 海拔高度（米），NaN = 无气压计
     var statusText: String = "等待 GPS..."
 
     // === 路网数据 ===
@@ -231,6 +232,7 @@ class HudView @JvmOverloads constructor(
     /**
      * 顶部时速码表 — Hudway 风格
      * 大号数字 + 小字 km/h
+     * 右上角显示海拔（如果有气压计）
      */
     private fun drawSpeedometer(canvas: Canvas, w: Float) {
         val cx = w / 2f
@@ -238,5 +240,20 @@ class HudView @JvmOverloads constructor(
         val speedStr = vehicleSpeed.toInt().toString()
         canvas.drawText(speedStr, cx, speedY, speedNumPaint)
         canvas.drawText("km/h", cx, speedY + 40f, speedUnitPaint)
+
+        // 海拔高度（右上角，如果有气压计数据）
+        if (!altitude.isNaN()) {
+            val altPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#88CCFF"); textSize = 32f
+                textAlign = Paint.Align.RIGHT
+                typeface = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
+            }
+            val altUnitPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#557788"); textSize = 20f
+                textAlign = Paint.Align.RIGHT
+            }
+            canvas.drawText("${altitude.toInt()}m", w - 30f, 55f, altPaint)
+            canvas.drawText("ALT", w - 30f, 80f, altUnitPaint)
+        }
     }
 }
