@@ -43,7 +43,7 @@ class HudView @JvmOverloads constructor(
     var vehicleLng: Double = 0.0
     var vehicleBearing: Float = 0f
     var vehicleSpeed: Float = 0f     // km/h
-    var altitude: Float = Float.NaN  // 海拔高度（米），NaN = 无气压计
+    var roadLayer: Int = 0           // 当前道路层级：0=地面, 1=高架/桥上, -1=隧道/地下
     var statusText: String = "等待 GPS..."
 
     // === 路网数据 ===
@@ -160,11 +160,48 @@ class HudView @JvmOverloads constructor(
         canvas.translate(cx, cy)
         canvas.rotate(-vehicleBearing)
 
+        val dynamicZoom = getDynamicZoom(vehicleSpeed)
+        val zoomFactor = 2f.pow(dynamicZoom - 15)
+
+        // 高架阴影画笔
+        val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0x33FFFFFF.toInt()
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+
+        // 虚线效果（用于隧道/地下路段）
+        val dashPathEffect = DashPathEffect(floatArrayOf(8f, 6f), 0f)
+
         for (segment in roadSegments) {
             val paint = roadPaints[segment.type] ?: continue
-            val dynamicZoom = getDynamicZoom(vehicleSpeed)
-            val zoomFactor = 2f.pow(dynamicZoom - 15)
             paint.strokeWidth = segment.type.widthBase * zoomFactor * 0.7f
+
+            // 高架路段：先画阴影（偏移），再画实线（更亮）
+            if (segment.elevated) {
+                shadowPaint.strokeWidth = paint.strokeWidth * 1.8f
+                canvas.save()
+                canvas.translate(3f, 3f)  // 阴影偏移
+                roadPath.reset()
+                var first = true
+                for ((lat, lng) in segment.points) {
+                    val (px, py) = latLngToPixel(lat, lng, drawLat, drawLng, metersPerPixel)
+                    if (first) { roadPath.moveTo(px, py); first = false }
+                    else roadPath.lineTo(px, py)
+                }
+                canvas.drawPath(roadPath, shadowPaint)
+                canvas.restore()
+
+                // 高架实线更亮
+                paint.strokeWidth *= 1.2f
+            }
+
+            // 隧道/地下路段：虚线 + 降低透明度
+            if (segment.tunnel) {
+                paint.pathEffect = dashPathEffect
+                paint.alpha = 120
+            }
 
             roadPath.reset()
             var first = true
@@ -174,6 +211,13 @@ class HudView @JvmOverloads constructor(
                 else roadPath.lineTo(px, py)
             }
             canvas.drawPath(roadPath, paint)
+
+            // 恢复画笔状态
+            paint.pathEffect = null
+            paint.alpha = 255
+            if (segment.elevated) {
+                paint.strokeWidth /= 1.2f
+            }
         }
 
         canvas.restore()
@@ -232,7 +276,7 @@ class HudView @JvmOverloads constructor(
     /**
      * 顶部时速码表 — Hudway 风格
      * 大号数字 + 小字 km/h
-     * 右上角显示海拔（如果有气压计）
+     * 右上角显示道路层级指示器（↑高架 / ↓隧道 / 无=地面）
      */
     private fun drawSpeedometer(canvas: Canvas, w: Float) {
         val cx = w / 2f
@@ -241,19 +285,25 @@ class HudView @JvmOverloads constructor(
         canvas.drawText(speedStr, cx, speedY, speedNumPaint)
         canvas.drawText("km/h", cx, speedY + 40f, speedUnitPaint)
 
-        // 海拔高度（右上角，如果有气压计数据）
-        if (!altitude.isNaN()) {
-            val altPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.parseColor("#88CCFF"); textSize = 32f
-                textAlign = Paint.Align.RIGHT
-                typeface = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
+        // 道路层级指示器（右上角，仅非地面时显示）
+        if (roadLayer != 0) {
+            val (label, color) = when {
+                roadLayer > 0 -> "↑ 高架" to Color.parseColor("#FF8844")
+                else -> "↓ 隧道" to Color.parseColor("#4488FF")
             }
-            val altUnitPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.parseColor("#557788"); textSize = 20f
+            val layerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                this.color = color; textSize = 28f
                 textAlign = Paint.Align.RIGHT
+                typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
             }
-            canvas.drawText("${altitude.toInt()}m", w - 30f, 55f, altPaint)
-            canvas.drawText("ALT", w - 30f, 80f, altUnitPaint)
+            // 半透明背景圆角矩形
+            val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                this.color = 0x66000000.toInt()
+            }
+            val textW = layerPaint.measureText(label)
+            val bgRect = RectF(w - 35f - textW - 16f, 25f, w - 20f, 70f)
+            canvas.drawRoundRect(bgRect, 8f, 8f, bgPaint)
+            canvas.drawText(label, w - 30f, 58f, layerPaint)
         }
     }
 }

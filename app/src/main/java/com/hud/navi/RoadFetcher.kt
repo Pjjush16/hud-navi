@@ -50,12 +50,18 @@ object RoadFetcher {
 
     /**
      * 道路分段数据
-     * @param type 道路类型 (motorway, primary, secondary, tertiary, residential, service, path)
+     * @param type 道路类型
      * @param points 经纬度坐标列表 [(lat,lng), ...]
+     * @param elevated 是否高架/桥梁 (bridge=yes 或 layer>0)
+     * @param tunnel 是否隧道
+     * @param layer OSM layer 值（默认 0，正值=上层，负值=下层）
      */
     data class RoadSegment(
         val type: RoadType,
-        val points: List<Pair<Double, Double>>
+        val points: List<Pair<Double, Double>>,
+        val elevated: Boolean = false,
+        val tunnel: Boolean = false,
+        val layer: Int = 0
     )
 
     enum class RoadType(val priority: Int, val color: Int, val widthBase: Float) {
@@ -119,11 +125,12 @@ object RoadFetcher {
     }
 
     private fun buildQuery(lat: Double, lng: Double): String {
+        // out tags 确保返回 bridge/tunnel/layer 等标签
         return """
             [out:json][timeout:10];
             way["highway"~"motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link|tertiary|tertiary_link|residential|living_street|unclassified|service"]
             (around:$RADIUS,$lat,$lng);
-            out body;
+            out tags;
             >;
             out skel qt;
         """.trimIndent()
@@ -144,6 +151,8 @@ object RoadFetcher {
 
         // 再解析 way → 路段
         val segments = mutableListOf<RoadSegment>()
+        var elevatedCount = 0
+        var tunnelCount = 0
         for (i in 0 until elements.length()) {
             val el = elements.getJSONObject(i)
             if (el.getString("type") != "way") continue
@@ -151,6 +160,18 @@ object RoadFetcher {
             val tags = el.optJSONObject("tags") ?: continue
             val highway = tags.optString("highway", "")
             val roadType = RoadType.fromHighway(highway)
+
+            // 解析高架/隧道/层级标签
+            val bridge = tags.optString("bridge", "")
+            val tunnel = tags.optString("tunnel", "")
+            val layerStr = tags.optString("layer", "0")
+            val layer = layerStr.toIntOrNull() ?: 0
+
+            val isElevated = bridge.isNotEmpty() && bridge != "no" || layer > 0
+            val isTunnel = tunnel.isNotEmpty() && tunnel != "no" || layer < 0
+
+            if (isElevated) elevatedCount++
+            if (isTunnel) tunnelCount++
 
             val nodeIds = el.getJSONArray("nodes")
             val points = mutableListOf<Pair<Double, Double>>()
@@ -160,9 +181,11 @@ object RoadFetcher {
             }
 
             if (points.size >= 2) {
-                segments.add(RoadSegment(roadType, points))
+                segments.add(RoadSegment(roadType, points, isElevated, isTunnel, layer))
             }
         }
+
+        Log.i(TAG, "Road segments: ${segments.size} total, $elevatedCount elevated, $tunnelCount tunnel")
 
         // 按优先级排序：小路先画（底层），大路后画（上层）
         return segments.sortedBy { it.type.priority }

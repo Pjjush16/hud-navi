@@ -51,14 +51,16 @@ import kotlinx.coroutines.launch
 import kotlin.math.*
 
 /**
- * HUD 导航 v10.2 — 陀螺仪驱动旋转 + GPS 慢速锚定
+ * HUD 导航 v10.3 — 气压计高架/隧道层级识别
  *
- * v10.1 → v10.2:
- * - 方向处理重构：GPS 不再直接驱动旋转
- * - 陀螺仪角速度积分 = 60fps 旋转源（丝滑）
- * - GPS 1Hz bearing = 慢速锚定校正（防陀螺仪漂移）
- * - 锚定系数按速度自适应：高速 4%/帧，中速 3%，低速 2%
- * - 收敛时间：高速 ~1.2s，中速 ~1.6s，低速 ~2.5s（到 90%）
+ * v10.2 → v10.3:
+ * - Overpass API 查询新增 bridge/tunnel/layer 标签解析
+ * - 气压计相对高度变化 + OSM 路网标签 → 判断当前在高架还是地面
+ * - 高架路段：加粗渲染 + 偏移阴影（视觉区分层级）
+ * - 隧道路段：虚线 + 降低透明度
+ * - HUD 右上角：↑高架（橙）/ ↓隧道（蓝）/ 无=地面
+ * - 海拔数字已隐去（不显示绝对海拔，只显示层级状态）
+ * - 层级判断带滞后（±3m 死区），避免频繁切换
  */
 class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener {
 
@@ -124,10 +126,14 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private var rvHeadingSmooth = 0f             // EMA 平滑
     private var rvInitialized = false
 
-    // === 气压计（海拔高度） ===
+    // === 气压计（海拔高度 → 层级判断） ===
     private var hasBarometer = false
     private var pressureAltitude = Float.NaN     // 气压海拔高度 (m)
-    private var baseAltitude = Float.NaN         // 首次气压读数对应的海拔（用于相对高度校正）
+    private var baseAltitude = Float.NaN         // 首次气压读数对应的海拔（基准面）
+    private var altitudeDelta = 0f               // 相对基准面的高度变化 (m)
+    private var smoothAltitudeDelta = 0f         // EMA 平滑后的高度变化
+    private val ALT_SMOOTH = 0.05f               // 高度变化 EMA 系数（很慢，过滤车内气压波动）
+    private var currentLayer = 0                 // 当前层级：0=地面, 1=高架, -1=隧道
 
     // === 状态 ===
     private var gpsFixCount = 0
@@ -701,14 +707,19 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
         hudView.vehicleBearing = vehicleBearing
         hudView.vehicleSpeed = (ekf.speed * 3.6).toFloat()  // m/s → km/h，用 EKF 积分速度
-        // 状态栏：EKF 状态 + 活跃传感器
+        // 状态栏：EKF 状态 + 活跃传感器 + 层级
         val sensors = buildString {
             append("GPS")
             if (hasGyro) append("+Gyro")
             if (hasRotationVector) append("+RV")
             if (hasBarometer) append("+Baro")
         }
-        hudView.statusText = "${ekf.getStatusString()} [$sensors]"
+        val layerInfo = when (currentLayer) {
+            1 -> " ↑高架"
+            -1 -> " ↓隧道"
+            else -> ""
+        }
+        hudView.statusText = "${ekf.getStatusString()} [$sensors]$layerInfo"
         hudView.invalidate()
     }
 
@@ -892,6 +903,54 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         return (from + diff + 360f) % 360f
     }
 
+    /**
+     * 气压计 + OSM 路网 → 判断当前道路层级
+     *
+     * 逻辑：
+     * 1. 气压升高 >5m + 附近存在高架路段 → 判定为高架
+     * 2. 气压降低 >3m + 附近存在隧道路段 → 判定为隧道
+     * 3. 气压回到 ±3m 内 → 回到地面
+     * 4. 附近没有高架/隧道 → 不管气压怎么变都保持地面（防误判）
+     */
+    private fun updateRoadLayer() {
+        if (!hudView.hasRoads) return
+
+        // 检查附近是否有高架/隧道路段（100m 范围内）
+        var hasNearbyElevated = false
+        var hasNearbyTunnel = false
+
+        for (seg in hudView.roadSegments) {
+            if (!seg.elevated && !seg.tunnel) continue
+            // 检查路段是否在当前车辆位置附近
+            for ((lat, lng) in seg.points) {
+                val dist = RoadFetcher.haversine(vehicleLat, vehicleLng, lat, lng)
+                if (dist < 100.0) {
+                    if (seg.elevated) hasNearbyElevated = true
+                    if (seg.tunnel) hasNearbyTunnel = true
+                    break
+                }
+            }
+            if (hasNearbyElevated && hasNearbyTunnel) break
+        }
+
+        val newLayer = when {
+            // 上升 >5m 且附近有高架 → 判定为高架
+            smoothAltitudeDelta > 5f && hasNearbyElevated -> 1
+            // 下降 >3m 且附近有隧道 → 判定为隧道
+            smoothAltitudeDelta < -3f && hasNearbyTunnel -> -1
+            // 高度变化回到 ±3m 内 → 地面
+            smoothAltitudeDelta in -3f..3f -> 0
+            // 其他情况保持当前层级（滞后效应，避免频繁切换）
+            else -> currentLayer
+        }
+
+        if (newLayer != currentLayer) {
+            Log.i(TAG, "Layer change: $currentLayer → $newLayer (Δalt=${String.format("%.1f", smoothAltitudeDelta)}m, nearbyElev=$hasNearbyElevated, nearbyTunnel=$hasNearbyTunnel)")
+            currentLayer = newLayer
+            hudView.roadLayer = newLayer
+        }
+    }
+
     // === 传感器 ===
     override fun onSensorChanged(event: SensorEvent) {
         when (event.sensor.type) {
@@ -933,15 +992,19 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             }
             Sensor.TYPE_PRESSURE -> {
                 // 气压计：气压 → 海拔高度（米）
-                // SensorManager.getAltitude(PRESSURE_STANDARD_ATMOSPHERE, pressure) 返回海拔
                 val pressure = event.values[0]
                 pressureAltitude = SensorManager.getAltitude(SensorManager.PRESSURE_STANDARD_ATMOSPHERE, pressure)
                 // 首次读数作为基准
                 if (baseAltitude.isNaN()) {
                     baseAltitude = pressureAltitude
                 }
-                // 传递给 HudView 显示
-                hudView.altitude = pressureAltitude
+                // 相对高度变化（正值=上升，负值=下降）
+                altitudeDelta = pressureAltitude - baseAltitude
+                // EMA 平滑（过滤车内气压波动：空调、车窗等）
+                smoothAltitudeDelta += ALT_SMOOTH * (altitudeDelta - smoothAltitudeDelta)
+
+                // 层级判断（结合气压变化 + OSM 路网标签）
+                updateRoadLayer()
             }
             Sensor.TYPE_LINEAR_ACCELERATION -> {
                 // 线性加速度（已去除重力），旋转到世界坐标系
