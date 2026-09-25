@@ -128,6 +128,12 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     }
 
     // === 速度分级吸附参数 ===
+    // 吸附状态（滞后机制，防止边缘抖动）
+    private var snapLocked = false              // 当前是否处于吸附锁定状态
+    private var snapLockFrames = 0              // 已锁定帧数
+    private val SNAP_LOCK_MIN_FRAMES = 60       // 最少锁定 60 帧（1s），防止闪断
+    private val SNAP_HYSTERESIS_RATIO = 1.5     // 脱锁阈值 = 吸锁阈值 × 1.5
+
     private fun getSnapParams(speedKmh: Float): Pair<Double, Double> {
         return when {
             speedKmh < 5f  -> Pair(0.0, 0.0)     // 0–5: 不吸附
@@ -137,11 +143,35 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         }
     }
 
+    /**
+     * 速度分级道路吸附（带滞后防抖）
+     *
+     * 滞后机制：
+     * - 吸锁阈值 = getSnapParams 返回值（如 20m）
+     * - 脱锁阈值 = 吸锁阈值 × 1.5（如 30m）
+     * - 一旦锁定，至少保持 SNAP_LOCK_MIN_FRAMES 帧（1s），防止反复开关
+     * - 锁定期间即使飘到脱锁阈值外，仍然保持吸附
+     * - 锁定帧数够且飘出脱锁阈值 → 释放锁定
+     */
     private fun snapToRoadSpeedAware(lat: Double, lng: Double, speedKmh: Float): Pair<Double, Double>? {
-        if (!hudView.hasRoads) return null
-        val (threshold, blendRatio) = getSnapParams(speedKmh)
-        if (threshold <= 0.0) return null
+        if (!hudView.hasRoads) {
+            snapLocked = false
+            snapLockFrames = 0
+            return null
+        }
+        val (baseThreshold, blendRatio) = getSnapParams(speedKmh)
+        if (baseThreshold <= 0.0) {
+            // 低速不吸附，但如果之前锁定了，平滑释放
+            snapLocked = false
+            snapLockFrames = 0
+            return null
+        }
 
+        // 脱锁阈值比吸锁阈值宽 50%（滞后带）
+        val lockThreshold = baseThreshold       // 进入吸附的距离
+        val unlockThreshold = baseThreshold * SNAP_HYSTERESIS_RATIO  // 脱离吸附的距离
+
+        // 计算到最近道路的投影距离
         var minDist = Double.MAX_VALUE
         var bestLat = lat
         var bestLng = lng
@@ -172,9 +202,48 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             }
         }
 
-        if (minDist > threshold) return null
-        val snappedLat = lat + (bestLat - lat) * blendRatio
-        val snappedLng = lng + (bestLng - lng) * blendRatio
+        // ── 滞后状态机 ──
+        val inLockRange = minDist <= lockThreshold
+        val inUnlockRange = minDist > unlockThreshold
+
+        when {
+            // 已锁定 + 仍在锁定范围内 → 保持锁定，刷新帧计数
+            snapLocked && !inUnlockRange -> {
+                snapLockFrames++
+            }
+            // 已锁定 + 飘出脱锁范围 + 锁定帧数够 → 释放
+            snapLocked && inUnlockRange && snapLockFrames >= SNAP_LOCK_MIN_FRAMES -> {
+                snapLocked = false
+                snapLockFrames = 0
+            }
+            // 已锁定 + 飘出脱锁范围 + 锁定帧数不够 → 强制保持锁定
+            snapLocked && inUnlockRange && snapLockFrames < SNAP_LOCK_MIN_FRAMES -> {
+                snapLockFrames++
+                // 不释放，继续吸附
+            }
+            // 未锁定 + 进入吸锁范围 → 锁定
+            !snapLocked && inLockRange -> {
+                snapLocked = true
+                snapLockFrames = 0
+            }
+            // 未锁定 + 在滞后带内（lockThreshold < dist < unlockThreshold） → 不操作
+            // 未锁定 + 超出脱锁范围 → 不吸附
+        }
+
+        if (!snapLocked) return null
+
+        // 吸附：按混合比修正位置
+        // 锁定期间如果距离变远，混合比动态降低（避免把箭头拉到太远的路上）
+        val effectiveBlend = if (minDist > lockThreshold) {
+            // 在滞后带内：随距离增大逐渐减弱混合比
+            val fade = ((unlockThreshold - minDist) / (unlockThreshold - lockThreshold)).coerceIn(0.0, 1.0)
+            blendRatio * fade
+        } else {
+            blendRatio
+        }
+
+        val snappedLat = lat + (bestLat - lat) * effectiveBlend
+        val snappedLng = lng + (bestLng - lng) * effectiveBlend
         return Pair(snappedLat, snappedLng)
     }
 
