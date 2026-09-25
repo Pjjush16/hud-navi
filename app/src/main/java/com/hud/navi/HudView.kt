@@ -175,8 +175,7 @@ class HudView @JvmOverloads constructor(
             paint.strokeWidth = segment.type.widthBase * zoomFactor * 0.7f
 
             if (segment.elevated) {
-                // 高架：加粗，不偏移
-                paint.strokeWidth *= 1.3f
+                // 高架：正常实线，不做任何特殊处理
             }
 
             if (segment.tunnel) {
