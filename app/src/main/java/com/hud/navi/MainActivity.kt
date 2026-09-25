@@ -29,16 +29,16 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlin.math.*
 
 /**
- * HUD 导航 v7.1 — 自研引擎 + 标准上帝视角 + v5.4 同款 UI
+ * HUD 导航 v8.0 — 极简 HUD + 自研引擎 + 上帝视角
  *
- * 布局恢复 v5.4 极简风格：
- * - 速度/状态/GPS箭头全部在 HudView Canvas 内绘制
- * - XML 只保留交互控件（镜像按钮、缩放、权限重试）
- * - GPS 方向箭头：屏幕顶部居中（始终指北）
- * - 速度：屏幕顶部居中大字
- * - 状态：屏幕底部居中
+ * v7.1 → v8.0 改动:
+ * - 剔除所有无用 UI（镜像按钮、缩放控件、状态文本、指南针）
+ * - 仅保留顶部时速码表（对标 Hudway）
+ * - 速度制动态缩放: 0km/h→Z18, 120+km/h→Z15
+ * - 道路吸附: 车辆位置自动贴合到最近道路
  */
 class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener {
 
@@ -47,16 +47,11 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private lateinit var sensorManager: SensorManager
     private val handler = Handler(Looper.getMainLooper())
 
-    // === UI（仅交互控件） ===
+    // === UI（仅权限重试） ===
     private lateinit var flipContainer: FrameLayout
-    private lateinit var btnMirror: TextView
-    private lateinit var btnZoomIn: TextView
-    private lateinit var btnZoomOut: TextView
-    private lateinit var zoomLevelText: TextView
     private lateinit var permDeniedLayout: LinearLayout
     private lateinit var btnRetryPerm: TextView
 
-    private var mirrorEnabled = false
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var roadFetchJob: Job? = null
 
@@ -96,6 +91,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         private const val TAG = "HudNavi"
         private const val ROAD_FETCH_DIST = 150.0
         private const val ROAD_FETCH_INTERVAL = 5000L
+        private const val SNAP_THRESHOLD_M = 20.0  // 道路吸附距离阈值（米）
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -103,12 +99,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContentView(R.layout.activity_main)
 
-        // 绑定 UI（仅交互控件）
         flipContainer = findViewById(R.id.flipContainer)
-        btnMirror = findViewById(R.id.btnMirror)
-        btnZoomIn = findViewById(R.id.btnZoomIn)
-        btnZoomOut = findViewById(R.id.btnZoomOut)
-        zoomLevelText = findViewById(R.id.zoomLevel)
         permDeniedLayout = findViewById(R.id.permDeniedLayout)
         btnRetryPerm = findViewById(R.id.btnRetryPerm)
         hudView = findViewById(R.id.hudView)
@@ -116,10 +107,6 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
 
-        // 事件绑定
-        btnMirror.setOnClickListener { toggleMirror() }
-        btnZoomIn.setOnClickListener { hudView.zoomLevel++; zoomLevelText.text = "${hudView.zoomLevel}" }
-        btnZoomOut.setOnClickListener { hudView.zoomLevel--; zoomLevelText.text = "${hudView.zoomLevel}" }
         btnRetryPerm.setOnClickListener {
             permDeniedLayout.visibility = View.GONE
             requestPermissions()
@@ -129,14 +116,6 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         requestPermissions()
     }
 
-    // === P0-1: HUD 镜像翻转 ===
-    private fun toggleMirror() {
-        mirrorEnabled = !mirrorEnabled
-        flipContainer.scaleY = if (mirrorEnabled) -1f else 1f
-        btnMirror.alpha = if (mirrorEnabled) 1.0f else 0.6f
-    }
-
-    // === P0-2: 前台服务 ===
     private fun startHudForegroundService() {
         val intent = Intent(this, HudForegroundService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -146,7 +125,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         }
     }
 
-    // === 权限管理 ===
+    // === 权限 ===
     private fun requestPermissions() {
         val perms = arrayOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
@@ -169,7 +148,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 startLocationUpdates()
             } else {
                 permDeniedLayout.visibility = View.VISIBLE
-                hudView.statusText = "需要定位权限才能使用导航"
+                hudView.statusText = "需要定位权限"
             }
         }
     }
@@ -182,8 +161,6 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         locationManager.getProvider(LocationManager.NETWORK_PROVIDER)?.let {
             locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 1000L, 5f, this)
         }
-
-        // 磁力计 + 加速度计
         val mag = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
         val acc = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         if (mag != null && acc != null) {
@@ -191,13 +168,10 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             sensorManager.registerListener(this, acc, SensorManager.SENSOR_DELAY_GAME)
             hasCompass = true
         }
-
-        // 尝试最后已知位置
         locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER)?.let { onLocationChanged(it) }
             ?: locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)?.let { onLocationChanged(it) }
     }
 
-    // === GPS 回调 ===
     override fun onLocationChanged(location: Location) {
         val now = System.currentTimeMillis()
         gpsFixCount++
@@ -219,40 +193,14 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                       else circularLerp(currBearing, rawBearing, BEARING_SMOOTH)
         currTime = now
 
-        // 首次定位立即设置
         if (prevLat == 0.0) {
             prevLat = currLat; prevLng = currLng
             prevBearing = currBearing; prevSpeed = currSpeed; prevTime = currTime
-            hudView.vehicleLat = currLat
-            hudView.vehicleLng = currLng
-            hudView.vehicleBearing = currBearing
-            hudView.vehicleSpeed = currSpeed
+            hudView.vehicleLat = currLat; hudView.vehicleLng = currLng
+            hudView.vehicleBearing = currBearing; hudView.vehicleSpeed = currSpeed
         }
 
-        // 更新状态文本
-        updateStatusText()
-
-        // 触发路网刷新
         tryFetchRoads()
-    }
-
-    private fun updateStatusText() {
-        val gpsAge = if (lastGpsTime > 0) (System.currentTimeMillis() - lastGpsTime) / 1000 else -1L
-        val parts = mutableListOf<String>()
-
-        when {
-            currLat == 0.0 -> parts.add("等待GPS...")
-            gpsAge > 10 -> parts.add("GPS丢失(${gpsAge}s)")
-            gpsAge > 5 -> parts.add("GPS弱(${gpsAge}s)")
-            else -> parts.add("GPS(${gpsFixCount})")
-        }
-
-        val b = if (hasCompass) compassBearing.toInt() else currBearing.toInt()
-        parts.add("${b}°")
-        parts.add("Z${hudView.zoomLevel}")
-        if (mirrorEnabled) parts.add("镜像")
-
-        hudView.statusText = parts.joinToString(" | ")
     }
 
     private fun tryFetchRoads() {
@@ -262,20 +210,60 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         val timeSince = now - lastRoadFetchTime
 
         if (dist > ROAD_FETCH_DIST || (timeSince > ROAD_FETCH_INTERVAL && !RoadFetcher.isCacheValid(currLat, currLng))) {
-            lastRoadFetchLat = currLat
-            lastRoadFetchLng = currLng
+            lastRoadFetchLat = currLat; lastRoadFetchLng = currLng
             lastRoadFetchTime = now
 
             roadFetchJob?.cancel()
             roadFetchJob = scope.launch {
                 val segments = RoadFetcher.fetchRoads(currLat, currLng)
                 hudView.setRoads(segments, currLat, currLng)
-                Log.i(TAG, "Roads updated: ${segments.size} segments")
+                Log.i(TAG, "Roads: ${segments.size} segments")
             }
         }
     }
 
-    // === 60fps 渲染帧 ===
+    /**
+     * 道路吸附：找到最近的道路段，将车辆位置投影到该段上
+     */
+    private fun snapToRoad(lat: Double, lng: Double): Pair<Double, Double>? {
+        if (!hudView.hasRoads) return null
+
+        var minDist = Double.MAX_VALUE
+        var bestLat = lat
+        var bestLng = lng
+
+        // 遍历所有路段，找最近点
+        for (segment in hudView.roadSegments) {
+            val points = segment.points
+            for (i in 0 until points.size - 1) {
+                val (lat1, lng1) = points[i]
+                val (lat2, lng2) = points[i + 1]
+
+                // 计算点到线段的投影
+                val dx = lng2 - lng1
+                val dy = lat2 - lat1
+                val lenSq = dx * dx + dy * dy
+                if (lenSq < 1e-12) continue
+
+                val t = ((lng - lng1) * dx + (lat - lat1) * dy) / lenSq
+                val clampedT = t.coerceIn(0.0, 1.0)
+
+                val projLat = lat1 + clampedT * dy
+                val projLng = lng1 + clampedT * dx
+
+                val dist = RoadFetcher.haversine(lat, lng, projLat, projLng)
+                if (dist < minDist) {
+                    minDist = dist
+                    bestLat = projLat
+                    bestLng = projLng
+                }
+            }
+        }
+
+        return if (minDist <= SNAP_THRESHOLD_M) Pair(bestLat, bestLng) else null
+    }
+
+    // === 60fps 渲染 ===
     private fun updateFrame() {
         if (currLat == 0.0) return
 
@@ -284,7 +272,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             Triple(currLat, currLng, currBearing)
         } else {
             val t = (elapsed.toFloat() / INTERP_MS).coerceIn(0f, 1f)
-            val et = 1f - (1f - t) * (1f - t) // easeOut
+            val et = 1f - (1f - t) * (1f - t)
             Triple(
                 prevLat + (currLat - prevLat) * et,
                 prevLng + (currLng - prevLng) * et,
@@ -292,16 +280,23 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             )
         }
 
-        hudView.vehicleLat = iLat
-        hudView.vehicleLng = iLng
+        // 道路吸附
+        val snapped = snapToRoad(iLat, iLng)
+        if (snapped != null) {
+            hudView.snappedLat = snapped.first
+            hudView.snappedLng = snapped.second
+            hudView.isSnapped = true
+            hudView.vehicleLat = snapped.first
+            hudView.vehicleLng = snapped.second
+        } else {
+            hudView.isSnapped = false
+            hudView.vehicleLat = iLat
+            hudView.vehicleLng = iLng
+        }
+
         hudView.vehicleBearing = iBearing
         hudView.vehicleSpeed = currSpeed
         hudView.invalidate()
-
-        // 状态文本定时刷新（GPS 断档时）
-        if (System.currentTimeMillis() - lastGpsTime > 3000 && gpsFixCount > 0) {
-            updateStatusText()
-        }
     }
 
     private fun circularLerp(from: Float, to: Float, t: Float): Float {
@@ -332,23 +327,17 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     }
 
     override fun onResume() {
-        super.onResume()
-        startRenderLoop()
-        startHudForegroundService()
+        super.onResume(); startRenderLoop(); startHudForegroundService()
     }
-
     override fun onPause() {
-        stopRenderLoop()
-        super.onPause()
+        stopRenderLoop(); super.onPause()
     }
-
     override fun onDestroy() {
         stopRenderLoop()
         locationManager.removeUpdates(this)
         sensorManager.unregisterListener(this)
         handler.removeCallbacksAndMessages(null)
-        roadFetchJob?.cancel()
-        scope.cancel()
+        roadFetchJob?.cancel(); scope.cancel()
         stopService(Intent(this, HudForegroundService::class.java))
         super.onDestroy()
     }

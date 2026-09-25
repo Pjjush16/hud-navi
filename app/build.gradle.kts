@@ -11,8 +11,8 @@ android {
         applicationId = "com.hud.navi"
         minSdk = 21
         targetSdk = 34
-        versionCode = 71
-        versionName = "7.1"
+        versionCode = 80
+        versionName = "8.0"
     }
 
     buildTypes {
@@ -33,7 +33,5 @@ dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")
-    // 协程（用于 Overpass API 异步请求）
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
-    // 纯自研引擎，零地图SDK依赖
 }
