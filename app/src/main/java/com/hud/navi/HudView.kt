@@ -7,10 +7,14 @@ import android.view.View
 import kotlin.math.*
 
 /**
- * hud-navi v7.0 — 自研 Canvas 2D 绘制引擎
+ * hud-navi v7.1 — 自研 Canvas 2D 引擎 + 标准上帝视角
  *
- * 标准上帝视角（正上方俯视），地图随航向旋转，车辆始终居中。
- * 零第三方地图 SDK 依赖，纯 Canvas API 绘制路网。
+ * 与 v5.4 相同的 UI 布局：
+ * - 速度显示：屏幕顶部居中（大字体）
+ * - GPS 方向箭头：屏幕顶部居中（速度下方）
+ * - 状态文本：屏幕底部居中
+ * - 车辆标记：屏幕中心偏下（65%）
+ * - 路网：上帝视角（正上方俯视），地图随航向旋转
  */
 class HudView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
@@ -21,15 +25,12 @@ class HudView @JvmOverloads constructor(
     var vehicleLng: Double = 0.0
     var vehicleBearing: Float = 0f  // 航向角（0=北，顺时针）
     var vehicleSpeed: Float = 0f    // km/h
+    var statusText: String = "等待 GPS..."
 
     // === 路网数据 ===
     private var roadSegments: List<RoadFetcher.RoadSegment> = emptyList()
-    private var roadDataCenterLat: Double = 0.0
-    private var roadDataCenterLng: Double = 0.0
 
     // === 缩放 ===
-    // metersPerPixel 在基准纬度下的值
-    // zoom 15 ≈ 4.8 m/px, zoom 16 ≈ 2.4, zoom 17 ≈ 1.2, zoom 18 ≈ 0.6
     var zoomLevel: Int = 16
         set(value) {
             field = value.coerceIn(13, 19)
@@ -38,30 +39,48 @@ class HudView @JvmOverloads constructor(
 
     // === 画笔 ===
     private val roadPaints = mutableMapOf<RoadFetcher.RoadType, Paint>()
-    private val bgPaint = Paint().apply { color = 0xFF0D0D14.toInt() }
-    private val vehiclePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val bgPaint = Paint().apply { color = Color.BLACK }
+
+    // 速度（顶部居中大字体，同 v5.4）
+    private val speedPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE; textSize = 80f; isFakeBoldText = true
+        typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        textAlign = Paint.Align.CENTER
+    }
+    private val unitPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#888888"); textSize = 28f
+        typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+        textAlign = Paint.Align.CENTER
+    }
+
+    // GPS 方向箭头（顶部居中）
+    private val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#00FF88"); style = Paint.Style.FILL
+    }
+    private val arrowGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#00FF88"); style = Paint.Style.FILL
+        maskFilter = BlurMaskFilter(15f, BlurMaskFilter.Blur.OUTER)
+    }
+
+    // 状态文本（底部居中）
+    private val statusPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#FF8844"); textSize = 30f
+        textAlign = Paint.Align.CENTER
+    }
+
+    // 车辆标记（中心）
+    private val vehicleFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE; style = Paint.Style.FILL
     }
-    private val vehicleGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0x4400FF88.toInt(); style = Paint.Style.FILL
-        maskFilter = BlurMaskFilter(30f, BlurMaskFilter.Blur.OUTER)
+    private val vehicleStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE; style = Paint.Style.STROKE
+        strokeWidth = 2f; strokeJoin = Paint.Join.ROUND
     }
-    private val vehicleOutlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0xFF00FF88.toInt(); style = Paint.Style.STROKE; strokeWidth = 3f
-    }
+
+    // 准星
     private val crosshairPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0x44FFFFFF.toInt(); style = Paint.Style.STROKE; strokeWidth = 1f
+        color = 0x33FFFFFF.toInt(); style = Paint.Style.STROKE; strokeWidth = 1f
         pathEffect = DashPathEffect(floatArrayOf(8f, 8f), 0f)
-    }
-    private val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0x11FFFFFF.toInt(); style = Paint.Style.STROKE; strokeWidth = 0.5f
-    }
-    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0xFF88CCFF.toInt(); textSize = 28f; typeface = Typeface.MONOSPACE
-    }
-    private val compassPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0x88FFFFFF.toInt(); textSize = 22f; textAlign = Paint.Align.CENTER
-        typeface = Typeface.DEFAULT_BOLD
     }
 
     private val roadPath = Path()
@@ -79,13 +98,8 @@ class HudView @JvmOverloads constructor(
         }
     }
 
-    /**
-     * 更新路网数据
-     */
     fun setRoads(segments: List<RoadFetcher.RoadSegment>, centerLat: Double, centerLng: Double) {
         roadSegments = segments
-        roadDataCenterLat = centerLat
-        roadDataCenterLng = centerLng
         invalidate()
     }
 
@@ -93,74 +107,43 @@ class HudView @JvmOverloads constructor(
         super.onDraw(canvas)
         val w = width.toFloat()
         val h = height.toFloat()
-        val cx = w / 2f
-        val cy = h / 2f
 
-        // 1. 深色背景
-        canvas.drawRect(0f, 0f, w, h, bgPaint)
+        // 1. 纯黑背景
+        canvas.drawColor(Color.BLACK)
 
-        if (vehicleLat == 0.0 && vehicleLng == 0.0) {
-            // 未定位时显示等待状态
-            drawWaitingState(canvas, cx, cy)
+        if (vehicleLat == 0.0) {
+            // 未定位：显示等待提示
+            canvas.drawText("等待 GPS...", w / 2f, h / 2f, statusPaint)
             return
         }
 
-        // 2. 计算投影参数
-        val metersPerPixel = getMetersPerPixel(vehicleLat, zoomLevel)
+        // 2. 上帝视角路网渲染
+        drawRoadNetwork(canvas, w, h)
 
-        // 3. 旋转画布（地图旋转，车始终朝上）
-        canvas.save()
-        canvas.translate(cx, cy)
-        canvas.rotate(-vehicleBearing) // 负号：地图旋转而非车旋转
+        // 3. 车辆标记（屏幕中心偏下 65%）
+        drawVehicleMarker(canvas, w, h)
 
-        // 4. 绘制网格
-        drawGrid(canvas, metersPerPixel)
-
-        // 5. 绘制路网（小路先画 → 大路后画）
-        drawRoads(canvas, metersPerPixel)
-
-        canvas.restore()
-
-        // 6. 绘制车辆标记（不随地图旋转）
-        drawVehicle(canvas, cx, cy)
-
-        // 7. 绘制准星
-        drawCrosshair(canvas, cx, cy)
-
-        // 8. 绘制指南针
-        drawCompass(canvas, w)
-
-        // 9. 绘制比例尺
-        drawScaleBar(canvas, h, metersPerPixel)
+        // 4. HUD 信息层（不随地图旋转）
+        drawHudInfo(canvas, w, h)
     }
 
     /**
-     * 经纬度 → 屏幕像素（相对于车辆位置）
+     * 上帝视角路网渲染
+     * 正上方俯视，地图随航向旋转，车辆始终居中
      */
-    private fun latLngToPixel(
-        lat: Double, lng: Double,
-        metersPerPixel: Double
-    ): Pair<Float, Float> {
-        // 使用简化的局部平面投影（适合小范围）
-        val cosLat = cos(Math.toRadians(vehicleLat))
-        val dx = (lng - vehicleLng) * 111320.0 * cosLat  // 东西方向（米）
-        val dy = (lat - vehicleLat) * 110540.0            // 南北方向（米）
+    private fun drawRoadNetwork(canvas: Canvas, w: Float, h: Float) {
+        val cx = w / 2f
+        val cy = h * 0.65f  // 车辆在 65% 处（中心偏下，给顶部 HUD 留空间）
+        val metersPerPixel = getMetersPerPixel(vehicleLat, zoomLevel)
 
-        // 北为正 Y → 屏幕 Y 轴向下，取反
-        val px = (dx / metersPerPixel).toFloat()
-        val py = (-dy / metersPerPixel).toFloat()
-        return Pair(px, py)
-    }
+        // 保存画布，旋转到航向
+        canvas.save()
+        canvas.translate(cx, cy)
+        canvas.rotate(-vehicleBearing)
 
-    private fun getMetersPerPixel(lat: Double, zoom: Int): Double {
-        val cosLat = cos(Math.toRadians(lat))
-        return 156543.03392 * cosLat / (1 shl zoom)
-    }
-
-    private fun drawRoads(canvas: Canvas, metersPerPixel: Double) {
+        // 绘制路网（小路先画 → 大路后画）
         for (segment in roadSegments) {
             val paint = roadPaints[segment.type] ?: continue
-            // 线宽随缩放级别调整
             val zoomFactor = 2f.pow(zoomLevel - 15)
             paint.strokeWidth = segment.type.widthBase * zoomFactor
 
@@ -177,85 +160,144 @@ class HudView @JvmOverloads constructor(
             }
             canvas.drawPath(roadPath, paint)
         }
+
+        // 准星（随地图旋转，表示前方方向）
+        val len = 50f
+        canvas.drawLine(-len, 0f, -15f, 0f, crosshairPaint)
+        canvas.drawLine(15f, 0f, len, 0f, crosshairPaint)
+        canvas.drawLine(0f, -len, 0f, -15f, crosshairPaint)
+        canvas.drawLine(0f, 15f, 0f, len, crosshairPaint)
+
+        canvas.restore()
     }
 
-    private fun drawVehicle(canvas: Canvas, cx: Float, cy: Float) {
-        // 外圈光晕
-        canvas.drawCircle(cx, cy, 28f, vehicleGlowPaint)
-        // 白色实心圆
-        canvas.drawCircle(cx, cy, 12f, vehiclePaint)
-        // 绿色描边
-        canvas.drawCircle(cx, cy, 12f, vehicleOutlinePaint)
-
-        // 方向三角（指向正上方，因为地图已经旋转了）
-        val arrowPath = Path()
-        arrowPath.moveTo(cx, cy - 22f)
-        arrowPath.lineTo(cx - 8f, cy - 8f)
-        arrowPath.lineTo(cx + 8f, cy - 8f)
-        arrowPath.close()
-        canvas.drawPath(arrowPath, vehicleOutlinePaint)
+    /**
+     * 经纬度 → 屏幕像素（相对于车辆位置，上帝视角）
+     */
+    private fun latLngToPixel(lat: Double, lng: Double, metersPerPixel: Double): Pair<Float, Float> {
+        val cosLat = cos(Math.toRadians(vehicleLat))
+        val dx = (lng - vehicleLng) * 111320.0 * cosLat  // 东西（米）
+        val dy = (lat - vehicleLat) * 110540.0            // 南北（米）
+        val px = (dx / metersPerPixel).toFloat()
+        val py = (-dy / metersPerPixel).toFloat()  // 北=上=-Y
+        return Pair(px, py)
     }
 
-    private fun drawCrosshair(canvas: Canvas, cx: Float, cy: Float) {
-        val len = 60f
-        canvas.drawLine(cx - len, cy, cx - 18f, cy, crosshairPaint)
-        canvas.drawLine(cx + 18f, cy, cx + len, cy, crosshairPaint)
-        canvas.drawLine(cx, cy - len, cx, cy - 18f, crosshairPaint)
-        canvas.drawLine(cx, cy + 18f, cx, cy + len, crosshairPaint)
+    private fun getMetersPerPixel(lat: Double, zoom: Int): Double {
+        val cosLat = cos(Math.toRadians(lat))
+        return 156543.03392 * cosLat / (1 shl zoom)
     }
 
-    private fun drawGrid(canvas: Canvas, metersPerPixel: Double) {
-        // 绘制 100m 间距的网格线
-        val gridSpacingMeters = 100.0
-        val gridSpacingPx = (gridSpacingMeters / metersPerPixel).toFloat()
-        if (gridSpacingPx < 20f) return // 太密就不画
+    /**
+     * 车辆标记 — 飞镖/纸飞机形（同 v5.4）
+     */
+    private fun drawVehicleMarker(canvas: Canvas, w: Float, h: Float) {
+        val cx = w / 2f
+        val cy = h * 0.65f
 
-        val extent = maxOf(width, height).toFloat() * 1.5f
-        var x = -extent
-        while (x < extent) {
-            val snapped = (x / gridSpacingPx).toInt() * gridSpacingPx
-            canvas.drawLine(snapped, -extent, snapped, extent, gridPaint)
-            canvas.drawLine(-extent, snapped, extent, snapped, gridPaint)
-            x += gridSpacingPx
+        // 飞镖形状
+        val size = 28f
+        val tipY = cy - size * 1.4f
+        val shoulderY = cy + size * 0.3f
+        val tailY = cy + size * 0.8f
+        val indentY = cy
+        val halfW = size * 0.55f
+
+        val dartPath = Path().apply {
+            moveTo(cx, tipY)
+            lineTo(cx - halfW, shoulderY)
+            lineTo(cx - halfW * 0.4f, tailY)
+            lineTo(cx, indentY)
+            lineTo(cx + halfW * 0.4f, tailY)
+            lineTo(cx + halfW, shoulderY)
+            close()
         }
+
+        canvas.drawPath(dartPath, vehicleFillPaint)
+        canvas.drawPath(dartPath, vehicleStrokePaint)
     }
 
-    private fun drawCompass(canvas: Canvas, w: Float) {
+    /**
+     * HUD 信息层（同 v5.4 布局）
+     * - 速度：屏幕顶部居中
+     * - GPS 方向箭头：顶部居中（速度下方）
+     * - 状态文本：底部居中
+     */
+    private fun drawHudInfo(canvas: Canvas, w: Float, h: Float) {
+        val cx = w / 2f
+
+        // ── 速度（屏幕顶部居中，大字体）──
+        val speedStr = vehicleSpeed.toInt().toString()
+        val speedY = 100f
+        canvas.drawText(speedStr, cx, speedY, speedPaint)
+        canvas.drawText("km/h", cx, speedY + 36f, unitPaint)
+
+        // ── GPS 方向箭头（顶部居中，速度下方）──
+        drawDirectionArrow(canvas, cx, speedY + 80f)
+
+        // ── 状态文本（底部居中）──
+        canvas.drawText(statusText, cx, h - 40f, statusPaint)
+
+        // ── 指南针（右上角小字）──
+        val compassPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0x88FFFFFF.toInt(); textSize = 22f; textAlign = Paint.Align.RIGHT
+            typeface = Typeface.DEFAULT_BOLD
+        }
         val directions = arrayOf("N", "NE", "E", "SE", "S", "SW", "W", "NW")
         val idx = ((vehicleBearing + 22.5f) % 360f / 45f).toInt() % 8
-        val heading = directions[idx]
-        canvas.drawText("$heading ${vehicleBearing.toInt()}°", w - 80f, 60f, compassPaint)
+        canvas.drawText("${directions[idx]} ${vehicleBearing.toInt()}°", w - 20f, 36f, compassPaint)
+
+        // ── 比例尺（左下角）──
+        drawScaleBar(canvas, h, getMetersPerPixel(vehicleLat, zoomLevel))
+    }
+
+    /**
+     * GPS 方向箭头 — 顶部居中
+     * 始终指北（不随地图旋转），让用户知道当前朝向
+     */
+    private fun drawDirectionArrow(canvas: Canvas, cx: Float, cy: Float) {
+        val size = 16f
+
+        // 外圈光晕
+        canvas.drawCircle(cx, cy, size + 8f, arrowGlowPaint)
+
+        // 箭头指北方向
+        canvas.save()
+        canvas.translate(cx, cy)
+        canvas.rotate(-vehicleBearing) // 箭头始终指北，车辆旋转时箭头反向
+
+        val arrowPath = Path()
+        arrowPath.moveTo(0f, -size)       // 尖端（北）
+        arrowPath.lineTo(-size * 0.6f, size * 0.5f)  // 左下
+        arrowPath.lineTo(0f, size * 0.2f)             // 内凹
+        arrowPath.lineTo(size * 0.6f, size * 0.5f)   // 右下
+        arrowPath.close()
+
+        canvas.drawPath(arrowPath, arrowPaint)
+        canvas.restore()
+
+        // "N" 标签
+        val nPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#00FF88"); textSize = 18f
+            textAlign = Paint.Align.CENTER; typeface = Typeface.DEFAULT_BOLD
+        }
+        canvas.drawText("N", cx, cy - size - 8f, nPaint)
     }
 
     private fun drawScaleBar(canvas: Canvas, h: Float, metersPerPixel: Double) {
-        // 比例尺：显示 100m 对应的像素宽度
         val barMeters = 100.0
         val barPx = (barMeters / metersPerPixel).toFloat()
-        val y = h - 30f
+        val y = h - 80f
         val x0 = 20f
-        val paint = Paint(textPaint).apply { strokeWidth = 2f; style = Paint.Style.STROKE; color = 0xAAFFFFFF.toInt() }
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0xAAFFFFFF.toInt(); style = Paint.Style.STROKE; strokeWidth = 2f
+        }
         canvas.drawLine(x0, y, x0 + barPx, y, paint)
         canvas.drawLine(x0, y - 5f, x0, y + 5f, paint)
         canvas.drawLine(x0 + barPx, y - 5f, x0 + barPx, y + 5f, paint)
-        canvas.drawText("100m", x0 + barPx / 2 - 20f, y - 10f, textPaint)
-    }
-
-    private fun drawWaitingState(canvas: Canvas, cx: Float, cy: Float) {
-        val paint = Paint(textPaint).apply {
-            textAlign = Paint.Align.CENTER; textSize = 36f; color = 0xFF44DDFF.toInt()
+        val textP = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0xAAFFFFFF.toInt(); textSize = 20f; textAlign = Paint.Align.CENTER
         }
-        canvas.drawText("等待 GPS 定位...", cx, cy, paint)
-
-        // 旋转的等待动画（用简单脉冲圆）
-        val pulse = (System.currentTimeMillis() % 2000) / 2000f
-        val r = 30f + pulse * 40f
-        val alpha = (255 * (1f - pulse)).toInt().coerceIn(0, 255)
-        val circlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0xFF44DDFF.toInt()
-            style = Paint.Style.STROKE
-            strokeWidth = 2f
-            this.alpha = alpha
-        }
-        canvas.drawCircle(cx, cy + 60f, r, circlePaint)
+        canvas.drawText("100m", x0 + barPx / 2f, y - 10f, textP)
     }
 }
