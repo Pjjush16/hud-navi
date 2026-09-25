@@ -90,9 +90,10 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private var lastFrameTime = 0L
     private val FRAME_MS = 16L
 
-    // 惯导速度：GPS 到达时锁定，GPS 丢失后指数衰减
-    private var imuSpeedKmh = 0f
-    private val VELOCITY_DECAY = 0.995f          // GPS 丢失后每帧速度衰减
+    // === 速度制位置追赶（学自 chase-game InterpolatedLocationProvider） ===
+    private val CHASE_SPEED_MPS = 15.0           // 追赶速度（15 m/s ≈ 54 km/h）
+    private val CHASE_MAX_DISP_M = 200.0         // 单帧最大位移（米），防切后台回来一帧跨半个地图
+    private val CHASE_SNAP_DIST = 0.5            // 距离 < 0.5m 时直接吸附到目标
 
     // === 路口检测 + 分支匹配 ===
     private var intersections: List<IntersectionNode> = emptyList()
@@ -684,21 +685,15 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         targetBearing = if (vehicleLat == 0.0) rawBearing
                         else circularShortest(vehicleBearing, rawBearing)
 
-        // ── GPS 到达：瞬移到校正位置（无追逐、无指数平滑） ──
+        // ── GPS 到达：首次定位瞬移，后续只更新 target（由 updateFrame 追赶） ──
         if (vehicleLat == 0.0) {
             // 首次定位
             vehicleLat = targetLat
             vehicleLng = targetLng
             vehicleBearing = targetBearing
             lastFrameTime = now
-        } else {
-            // 后续 GPS：瞬移修正
-            vehicleLat = targetLat
-            vehicleLng = targetLng
         }
-
-        // ── 惯导速度锁定到 GPS 速度 ──
-        imuSpeedKmh = targetSpeed
+        // 后续 GPS：不瞬移，targetLat/targetLng 已在上面更新，由 chaseTargetPosition 追赶
 
         // ── 重置加速度平滑（GPS 来了，惯导重新校准） ──
         smoothedWorldAcc[0] = 0f
@@ -745,8 +740,8 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         // ── 路口检测 ──
         detectIntersection()
 
-        // ── IMU 惯导推进（GPS 间隔内用指南针航向 + 惯导速度推算位置） ──
-        propagateInertial(dt)
+        // ── 速度制位置追赶（学自 chase-game InterpolatedLocationProvider） ──
+        chaseTargetPosition(dt)
 
         // ── 方向处理（纯 GPS 航向 + 死区 + 路口分支锁定） ──
         val newBearing = when {
@@ -856,56 +851,55 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     }
 
     /**
-     * IMU 惯导推进
+     * 速度制位置追赶（学自 chase-game InterpolatedLocationProvider v5.0.0）
      *
-     * GPS 每 500ms~1s 来一次，中间用惯导填充：
-     * - 航向：纯 GPS 航向 + 死区过滤
-     * - 路口增强：在路口附近且匹配到分支时，惯导航向偏向分支朝向
-     * - 速度：GPS 到达时锁定，GPS 丢失后指数衰减
-     * - 加速度计：检测运动状态，静止时冻结航向和位置
+     * 每帧从 vehicleLat/Lng 朝 targetLat/Lng 移动：
+     * - 速度固定 CHASE_SPEED_MPS（15 m/s ≈ 54 km/h），跟帧率无关
+     * - 单帧位移上限 CHASE_MAX_DISP_M（200m），防切后台回来一帧跨半个地图
+     * - 距离 < 0.5m 时直接吸附，避免永远差一点点
      */
-    private fun propagateInertial(dt: Double) {
-        val speedKmh = imuSpeedKmh
-        val speedMs = speedKmh / 3.6
+    private fun chaseTargetPosition(dt: Double) {
+        val dtSec = dt / 1000.0
 
-        // ── 加速度计运动检测 ──
-        val accMag = sqrt(
-            worldAcc[0] * worldAcc[0] +
-            worldAcc[1] * worldAcc[1] +
-            worldAcc[2] * worldAcc[2]
+        // 当前显示位置到 GPS 目标的距离（米）
+        val distToTarget = RoadFetcher.haversine(vehicleLat, vehicleLng, targetLat, targetLng)
+
+        if (distToTarget > CHASE_SNAP_DIST) {
+            // 本帧允许的最大位移 = 速度 × dt
+            var maxDisp = CHASE_SPEED_MPS * dtSec
+            // 钳制：单帧最大位移
+            maxDisp = maxDisp.coerceAtMost(CHASE_MAX_DISP_M)
+
+            // 实际移动距离 = min(到目标的距离, 本帧最大位移)
+            val moveDistance = distToTarget.coerceAtMost(maxDisp)
+
+            // 朝目标方向移动
+            val bearing = bearingBetween(vehicleLat, vehicleLng, targetLat, targetLng)
+            val result = movePoint(vehicleLat, vehicleLng, bearing.toDouble(), moveDistance)
+            vehicleLat = result[0]
+            vehicleLng = result[1]
+        } else {
+            // 足够近，直接吸附
+            vehicleLat = targetLat
+            vehicleLng = targetLng
+        }
+    }
+
+    /**
+     * 从一点沿给定方向移动指定距离（米），返回 [lat, lng]
+     */
+    private fun movePoint(lat: Double, lng: Double, bearingDeg: Double, distM: Double): DoubleArray {
+        val R = 6371000.0
+        val d = distM / R
+        val brng = Math.toRadians(bearingDeg)
+        val lat1 = Math.toRadians(lat)
+        val lng1 = Math.toRadians(lng)
+        val lat2 = asin(sin(lat1) * cos(d) + cos(lat1) * sin(d) * cos(brng))
+        val lng2 = lng1 + atan2(
+            sin(brng) * sin(d) * cos(lat1),
+            cos(d) - sin(lat1) * sin(lat2)
         )
-        val isStationary = accMag < FREEZE_ACC_THRESHOLD && speedKmh < FREEZE_SPEED_THRESHOLD
-
-        // 静止时不推进
-        if (isStationary) return
-
-        // ── 航向：纯 GPS ──
-        var heading = vehicleBearing
-
-        // 路口增强：在路口附近且匹配到分支时，将惯导航向向分支朝向混合
-        if (nearIntersection && !matchedBranchHeading.isNaN() && branchLockFrames > 5) {
-            val diff = ((matchedBranchHeading - heading + 540f) % 360f) - 180f
-            // 70% GPS + 30% 分支朝向（路口时更信任道路方向）
-            heading = ((heading + diff * 0.3f) + 360f) % 360f
-        }
-
-        val headingRad = Math.toRadians(heading.toDouble())
-
-        // 位移 = 速度 × 时间
-        val distMeters = speedMs * (dt / 1000.0)
-
-        // 经纬度增量（小角度近似）
-        val dLat = distMeters * cos(headingRad) / 111111.0
-        val dLng = distMeters * sin(headingRad) / (111111.0 * cos(Math.toRadians(vehicleLat)))
-
-        vehicleLat += dLat
-        vehicleLng += dLng
-
-        // ── GPS 丢失后速度自然衰减（模拟减速） ──
-        val timeSinceGps = System.currentTimeMillis() - lastGpsTime
-        if (timeSinceGps > 2000) {
-            imuSpeedKmh *= VELOCITY_DECAY
-        }
+        return doubleArrayOf(Math.toDegrees(lat2), Math.toDegrees(lng2))
     }
 
     private fun circularShortest(from: Float, to: Float): Float {
