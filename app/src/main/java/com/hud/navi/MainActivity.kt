@@ -284,14 +284,14 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         val dist = RoadFetcher.haversine(targetLat, targetLng, lastRoadFetchLat, lastRoadFetchLng)
         val timeSince = now - lastRoadFetchTime
 
-        if (dist > ROAD_FETCH_DIST || (timeSince > ROAD_FETCH_INTERVAL && !RoadFetcher.isCacheValid(currLat, currLng))) {
-            lastRoadFetchLat = currLat; lastRoadFetchLng = currLng
+        if (dist > ROAD_FETCH_DIST || (timeSince > ROAD_FETCH_INTERVAL && !RoadFetcher.isCacheValid(targetLat, targetLng))) {
+            lastRoadFetchLat = targetLat; lastRoadFetchLng = targetLng
             lastRoadFetchTime = now
 
             roadFetchJob?.cancel()
             roadFetchJob = scope.launch {
-                val segments = RoadFetcher.fetchRoads(currLat, currLng)
-                hudView.setRoads(segments, currLat, currLng)
+                val segments = RoadFetcher.fetchRoads(targetLat, targetLng)
+                hudView.setRoads(segments, targetLat, targetLng)
                 Log.i(TAG, "Roads: ${segments.size} segments")
             }
         }
