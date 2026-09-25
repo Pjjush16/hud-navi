@@ -51,18 +51,14 @@ import kotlinx.coroutines.launch
 import kotlin.math.*
 
 /**
- * HUD 导航 v10.0 — EKF 卡尔曼融合惯导（高德式"后端融合"）
+ * HUD 导航 v10.2 — 陀螺仪驱动旋转 + GPS 慢速锚定
  *
- * v9.8 → v10.0:
- * - 用 EKF 卡尔曼滤波替代速度制追赶（chase）
- * - "后端融合"模式：IMU 推算的经纬度是主位置，GPS 只在偏差大时校正
- * - GPS 丢失后 IMU 继续推算，速度自然衰减
- * - 卡尔曼增益 K 动态调节：GPS 好→多信 GPS，GPS 差→多信 IMU
- * - 位置不确定度 σ 驱动 HMM sigma 自适应
- *
- * 学自高德车机版 v9.5.0 逆向分析：
- * com.amap.location.fusion.LocationProvider（后端融合模式）
- * com.amap.location.support.security.gnssrtk.SatSol（KalmanFilter）
+ * v10.1 → v10.2:
+ * - 方向处理重构：GPS 不再直接驱动旋转
+ * - 陀螺仪角速度积分 = 60fps 旋转源（丝滑）
+ * - GPS 1Hz bearing = 慢速锚定校正（防陀螺仪漂移）
+ * - 锚定系数按速度自适应：高速 4%/帧，中速 3%，低速 2%
+ * - 收敛时间：高速 ~1.2s，中速 ~1.6s，低速 ~2.5s（到 90%）
  */
 class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener {
 
@@ -622,36 +618,55 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         vehicleLat = ekf.lat
         vehicleLng = ekf.lng
 
-        // ── 方向处理（多源融合：GPS + 陀螺仪积分 + 旋转矢量） ──
+        // ── 方向处理（高德式：陀螺仪驱动旋转 + GPS 慢速锚定） ──
+        //
+        // 核心原理（逆向高德学到的）：
+        // 1. 陀螺仪 200Hz 输出角速度 → 每帧积分 → 60fps 平滑旋转
+        // 2. GPS 1Hz 到达 → 只当"锚点"，每帧施加微弱校正防止漂移
+        // 3. GPS 不直接驱动旋转，旋转全部由陀螺仪负责
+        //
+        // 效果：转弯时陀螺仪实时响应（丝滑），GPS 只负责"别跑偏"
+        //
         val gyroActive = hasGyro && (System.currentTimeMillis() - lastGyroTime) < 500
         val dtSec = dt / 1000.0
 
+        // ── Step 1: 陀螺仪驱动旋转（60fps） ──
+        var headingFromGyro = vehicleBearing
+        if (gyroActive && abs(gyroHeadingRateSmooth) > 0.3f) {
+            // 角速度积分：heading += rate(deg/s) * dt(s)
+            headingFromGyro = vehicleBearing + gyroHeadingRateSmooth * dtSec.toFloat()
+        }
+
+        // ── Step 2: GPS 锚定校正（慢速，防止陀螺仪漂移） ──
         val newBearing = when {
-            // 在路口且匹配到分支 → 优先跟随分支朝向
+            // 在路口且匹配到分支 → 分支朝向优先
             nearIntersection && !matchedBranchHeading.isNaN() -> {
-                val diff = ((matchedBranchHeading - vehicleBearing + 540f) % 360f) - 180f
-                if (abs(diff) < HEADING_DEAD_ZONE) vehicleBearing
-                else vehicleBearing + diff * 0.6f
+                val diff = ((matchedBranchHeading - headingFromGyro + 540f) % 360f) - 180f
+                if (abs(diff) < HEADING_DEAD_ZONE) headingFromGyro
+                else headingFromGyro + diff * 0.3f  // 路口分支：中速跟随
             }
-            // GPS 有航向且速度足够 → 用 GPS 航向 + 死区过滤
+            // GPS 有航向且速度足够 → GPS 做慢速锚定（不是直接跳转！）
             targetSpeed > 1f -> {
-                val diff = ((targetBearing - vehicleBearing + 540f) % 360f) - 180f
-                if (abs(diff) < HEADING_DEAD_ZONE) vehicleBearing
-                else vehicleBearing + diff * 0.5f
+                val diff = ((targetBearing - headingFromGyro + 540f) % 360f) - 180f
+                // 锚定系数：GPS 到达后慢慢把陀螺仪积分拉回 GPS 方向
+                // 系数越小越平滑，0.02 = 每帧只校正 2%（约 2.5 秒收敛到 90%）
+                // 高速时系数大一点（转弯快需要更快锚定）
+                val anchorRate = when {
+                    targetSpeed > 60f -> 0.04f   // 高速：4%/帧（约 1.2 秒收敛）
+                    targetSpeed > 30f -> 0.03f   // 中速：3%/帧（约 1.6 秒收敛）
+                    else -> 0.02f                // 低速：2%/帧（约 2.5 秒收敛）
+                }
+                if (abs(diff) < HEADING_DEAD_ZONE) headingFromGyro
+                else headingFromGyro + diff * anchorRate
             }
-            // GPS 无航向但有陀螺仪 → 用陀螺仪角速度积分推算航向
-            gyroActive && abs(gyroHeadingRateSmooth) > 0.5f -> {
-                // 陀螺仪积分：heading += rate * dt
-                vehicleBearing + gyroHeadingRateSmooth * dtSec.toFloat()
-            }
-            // 低速/静止但有旋转矢量 → 缓慢跟随旋转矢量航向
+            // GPS 无航向但有旋转矢量 → 缓慢跟随
             hasRotationVector && rvInitialized -> {
-                val diff = ((rvHeadingSmooth - vehicleBearing + 540f) % 360f) - 180f
-                if (abs(diff) < HEADING_DEAD_ZONE) vehicleBearing
-                else vehicleBearing + diff * 0.1f  // 非常缓慢跟随，避免低速抖动
+                val diff = ((rvHeadingSmooth - headingFromGyro + 540f) % 360f) - 180f
+                if (abs(diff) < HEADING_DEAD_ZONE) headingFromGyro
+                else headingFromGyro + diff * 0.05f  // 非常缓慢跟随
             }
-            // 都没有 → 保持上次航向
-            else -> vehicleBearing
+            // 都没有 → 保持陀螺仪积分结果
+            else -> headingFromGyro
         }
         vehicleBearing = ((newBearing % 360f) + 360f) % 360f
 
