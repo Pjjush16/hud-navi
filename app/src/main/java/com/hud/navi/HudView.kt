@@ -163,9 +163,13 @@ class HudView @JvmOverloads constructor(
         val dynamicZoom = getDynamicZoom(vehicleSpeed)
         val zoomFactor = 2f.pow(dynamicZoom - 15)
 
-        // 高架阴影画笔
+        // 高架抬升偏移量（像素）— 物理上移，看起来在高处
+        val elevatedOffsetX = 18f
+        val elevatedOffsetY = -22f
+
+        // 高架阴影画笔（画在地面位置，表示高架的投影）
         val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0x33FFFFFF.toInt()
+            color = 0x22FFFFFF.toInt()
             style = Paint.Style.STROKE
             strokeCap = Paint.Cap.ROUND
             strokeJoin = Paint.Join.ROUND
@@ -174,15 +178,14 @@ class HudView @JvmOverloads constructor(
         // 虚线效果（用于隧道/地下路段）
         val dashPathEffect = DashPathEffect(floatArrayOf(8f, 6f), 0f)
 
+        // === 第一遍：画所有地面道路 + 高架的地面阴影 + 隧道 ===
         for (segment in roadSegments) {
             val paint = roadPaints[segment.type] ?: continue
             paint.strokeWidth = segment.type.widthBase * zoomFactor * 0.7f
 
-            // 高架路段：先画阴影（偏移），再画实线（更亮）
             if (segment.elevated) {
-                shadowPaint.strokeWidth = paint.strokeWidth * 1.8f
-                canvas.save()
-                canvas.translate(3f, 3f)  // 阴影偏移
+                // 高架：先在地面位置画阴影（半透明细线）
+                shadowPaint.strokeWidth = paint.strokeWidth * 0.6f
                 roadPath.reset()
                 var first = true
                 for ((lat, lng) in segment.points) {
@@ -191,16 +194,13 @@ class HudView @JvmOverloads constructor(
                     else roadPath.lineTo(px, py)
                 }
                 canvas.drawPath(roadPath, shadowPaint)
-                canvas.restore()
-
-                // 高架实线更亮
-                paint.strokeWidth *= 1.2f
+                // 不在这一遍画实线
+                continue
             }
 
-            // 隧道/地下路段：虚线 + 降低透明度
             if (segment.tunnel) {
                 paint.pathEffect = dashPathEffect
-                paint.alpha = 120
+                paint.alpha = 100
             }
 
             roadPath.reset()
@@ -212,12 +212,25 @@ class HudView @JvmOverloads constructor(
             }
             canvas.drawPath(roadPath, paint)
 
-            // 恢复画笔状态
             paint.pathEffect = null
             paint.alpha = 255
-            if (segment.elevated) {
-                paint.strokeWidth /= 1.2f
+        }
+
+        // === 第二遍：画高架道路（物理抬升，偏移绘制） ===
+        for (segment in roadSegments) {
+            if (!segment.elevated) continue
+            val paint = roadPaints[segment.type] ?: continue
+            paint.strokeWidth = segment.type.widthBase * zoomFactor * 0.7f * 1.15f  // 高架稍粗
+
+            // 用偏移量画高架实线（物理位置抬高）
+            roadPath.reset()
+            var first = true
+            for ((lat, lng) in segment.points) {
+                val (px, py) = latLngToPixel(lat, lng, drawLat, drawLng, metersPerPixel)
+                if (first) { roadPath.moveTo(px + elevatedOffsetX, py + elevatedOffsetY); first = false }
+                else roadPath.lineTo(px + elevatedOffsetX, py + elevatedOffsetY)
             }
+            canvas.drawPath(roadPath, paint)
         }
 
         canvas.restore()
