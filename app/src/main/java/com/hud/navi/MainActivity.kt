@@ -32,13 +32,14 @@ import kotlinx.coroutines.launch
 import kotlin.math.*
 
 /**
- * HUD 导航 v8.0 — 极简 HUD + 自研引擎 + 上帝视角
+ * HUD 导航 v8.1 — 极简 HUD + GPS 抗跳变
  *
- * v7.1 → v8.0 改动:
- * - 剔除所有无用 UI（镜像按钮、缩放控件、状态文本、指南针）
- * - 仅保留顶部时速码表（对标 Hudway）
- * - 速度制动态缩放: 0km/h→Z18, 120+km/h→Z15
- * - 道路吸附: 车辆位置自动贴合到最近道路
+ * v8.0 → v8.1:
+ * - 卡尔曼滤波：lat/lng 独立 1D Kalman，平滑噪声
+ * - 最小位移阈值：< 3m 视为静止抖动，不更新位置
+ * - 异常点剔除：隐含速度 > 300km/h 的跳点直接丢弃
+ * - 速度 EMA 平滑：防止速度突变
+ * - GPS accuracy 加权：精度差时降低卡尔曼增益
  */
 class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener {
 
@@ -46,6 +47,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private lateinit var locationManager: LocationManager
     private lateinit var sensorManager: SensorManager
     private val handler = Handler(Looper.getMainLooper())
+
+    // === GPS 抗跳变滤波器 ===
+    private val gpsFilter = GpsFilter()
 
     // === UI（仅权限重试） ===
     private lateinit var flipContainer: FrameLayout
@@ -177,13 +181,24 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         gpsFixCount++
         lastGpsTime = now
 
+        // ── GPS 抗跳变滤波 ──
+        val filtered = gpsFilter.process(
+            rawLat = location.latitude,
+            rawLng = location.longitude,
+            rawSpeedMs = location.speed,
+            accuracy = location.accuracy,
+            timestampMs = now
+        ) ?: return  // 被异常点剔除，直接丢弃
+
+        val (filteredLat, filteredLng, filteredSpeedKmh) = filtered
+
         if (currLat != 0.0) {
             prevLat = currLat; prevLng = currLng
             prevBearing = currBearing; prevSpeed = currSpeed; prevTime = currTime
         }
-        currLat = location.latitude
-        currLng = location.longitude
-        currSpeed = location.speed * 3.6f
+        currLat = filteredLat
+        currLng = filteredLng
+        currSpeed = filteredSpeedKmh
         val rawBearing = when {
             location.hasBearing() && location.speed > 1f -> location.bearing
             hasCompass -> compassBearing
