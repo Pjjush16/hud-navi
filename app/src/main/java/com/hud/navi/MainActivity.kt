@@ -115,18 +115,18 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             .withSource(tiles)
             // ── 水体 ──
             .withLayer(FillLayer("water", "openmaptiles").apply {
-                sourceLayer = "water"
+                withSourceLayer("water")
                 setProperties(PropertyFactory.fillColor("#0A1628"))
             })
             // ── 陆地覆被 ──
             .withLayer(FillLayer("landuse", "openmaptiles").apply {
-                sourceLayer = "landuse"
+                withSourceLayer("landuse")
                 setProperties(PropertyFactory.fillColor("#0D0D14"))
             })
             // ── 道路（由细到粗分层渲染） ──
             // 小路与服务道路
             .withLayer(LineLayer("road-minor", "openmaptiles").apply {
-                sourceLayer = "transportation"
+                withSourceLayer("transportation")
                 filter = Expression.any(
                     Expression.eq(Expression.get("class"), Expression.literal("service")),
                     Expression.eq(Expression.get("class"), Expression.literal("path")),
@@ -142,7 +142,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             })
             // 次要道路
             .withLayer(LineLayer("road-secondary", "openmaptiles").apply {
-                sourceLayer = "transportation"
+                withSourceLayer("transportation")
                 filter = Expression.any(
                     Expression.eq(Expression.get("class"), Expression.literal("tertiary")),
                     Expression.eq(Expression.get("class"), Expression.literal("secondary")),
@@ -160,7 +160,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             })
             // 主要道路（亮白，Hudway 风格的醒目道路）
             .withLayer(LineLayer("road-primary", "openmaptiles").apply {
-                sourceLayer = "transportation"
+                withSourceLayer("transportation")
                 filter = Expression.any(
                     Expression.eq(Expression.get("class"), Expression.literal("primary")),
                     Expression.eq(Expression.get("class"), Expression.literal("trunk"))
@@ -177,7 +177,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             })
             // 高速公路（最亮，青色高亮）
             .withLayer(LineLayer("road-motorway", "openmaptiles").apply {
-                sourceLayer = "transportation"
+                withSourceLayer("transportation")
                 filter = Expression.eq(Expression.get("class"), Expression.literal("motorway"))
                 setProperties(
                     PropertyFactory.lineColor("#44DDFF"),
@@ -191,7 +191,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             })
             // ── 3D 建筑拉伸（Hudway 核心效果） ──
             .withLayer(FillExtrusionLayer("hud-buildings", "openmaptiles").apply {
-                sourceLayer = "building"
+                withSourceLayer("building")
                 setProperties(
                     PropertyFactory.fillExtrusionColor("#556677"),
                     PropertyFactory.fillExtrusionOpacity(0.9f),
@@ -227,7 +227,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
      */
     private fun addVehicleMarker(style: Style) {
         val geoJson = createPointGeoJson(0.0, 0.0)
-        style.addSource(GeoJsonSource("vehicle", geoJson))
+        style.addSource(GeoJsonSource("vehicle", geoJson.toString()))
 
         // 外圈发光（绿色光晕）
         style.addLayer(CircleLayer("vehicle-glow", "vehicle").apply {
@@ -358,7 +358,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
     private fun updateVehicleMarker(lat: Double, lng: Double) {
         mapboxMap?.getStyle { style ->
-            (style.getSource("vehicle") as? GeoJsonSource)?.setGeoJson(createPointGeoJson(lat, lng))
+            (style.getSource("vehicle") as? GeoJsonSource)?.setGeoJson(createPointGeoJson(lat, lng).toString())
         }
     }
 
