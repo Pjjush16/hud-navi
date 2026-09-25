@@ -477,7 +477,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private fun matchBranchAtIntersection(
         lat: Double, lng: Double, compass: Float
     ): BranchInfo? {
-        if (!nearIntersection || !hasCompass) return null
+        if (!nearIntersection) return null
 
         // 找最近的路口
         var nearestInt: IntersectionNode? = null
@@ -674,10 +674,12 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         targetSpeed = filteredSpeedKmh
         gpsAccuracy = location.accuracy
 
-        val rawBearing = when {
-            location.hasBearing() && location.speed > 1f -> location.bearing
-            hasCompass -> smoothedCompassBearing  // 使用平滑后的指南针
-            else -> 0f
+        // ── 航向：纯 GPS，不依赖指南针 ──
+        val rawBearing = if (location.hasBearing() && location.speed > 0.5f) {
+            location.bearing
+        } else {
+            // 低速/静止：保持上一次航向（避免无方向时的跳变）
+            vehicleBearing
         }
         targetBearing = if (vehicleLat == 0.0) rawBearing
                         else circularShortest(vehicleBearing, rawBearing)
@@ -746,32 +748,31 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         // ── IMU 惯导推进（GPS 间隔内用指南针航向 + 惯导速度推算位置） ──
         propagateInertial(dt)
 
-        // ── 方向处理（抗抖动核心 + 路口分支锁定） ──
+        // ── 方向处理（纯 GPS 航向 + 死区 + 路口分支锁定） ──
         val newBearing = when {
             // 在路口且匹配到分支 → 优先跟随分支朝向
             nearIntersection && !matchedBranchHeading.isNaN() -> {
                 val diff = ((matchedBranchHeading - vehicleBearing + 540f) % 360f) - 180f
                 if (abs(diff) < HEADING_DEAD_ZONE) vehicleBearing
-                else vehicleBearing + diff * 0.6f  // 路口处稍微更积极地跟上分支方向
+                else vehicleBearing + diff * 0.6f
             }
-            // GPS 速度足够 → 强制用 GPS 航向（比指南针稳定得多）
-            targetSpeed > GPS_BEARING_SPEED -> targetBearing
-            // 有指南针 → 用 EMA 平滑后的指南针 + 死区过滤
-            hasCompass -> {
-                val diff = ((smoothedCompassBearing - vehicleBearing + 540f) % 360f) - 180f
+            // GPS 有航向且速度足够 → 用 GPS 航向 + 死区过滤
+            targetSpeed > 1f -> {
+                val diff = ((targetBearing - vehicleBearing + 540f) % 360f) - 180f
                 if (abs(diff) < HEADING_DEAD_ZONE) vehicleBearing  // 死区内：不动
-                else vehicleBearing + diff * 0.5f  // 死区外：半速过渡（进一步平滑）
+                else vehicleBearing + diff * 0.5f  // 死区外：半速过渡
             }
+            // 低速/静止 → 保持上次航向
             else -> vehicleBearing
         }
         vehicleBearing = ((newBearing % 360f) + 360f) % 360f
 
         // ── 道路吸附（HMM 地图匹配 + 路口增强） ──
         // HMM 是主吸附引擎：概率模型天然无抖动，不需要阈值/滞后/锁定帧
-        // 路口分支匹配作为补充：在路口处用指南针辅助判断转入方向
+        // 路口分支匹配作为补充：在路口处用 GPS 航向辅助判断转入方向
         var snapped: Pair<Double, Double>? = null
         if (nearIntersection && !matchedBranchHeading.isNaN()) {
-            val branch = matchBranchAtIntersection(vehicleLat, vehicleLng, smoothedCompassBearing)
+            val branch = matchBranchAtIntersection(vehicleLat, vehicleLng, vehicleBearing)
             if (branch != null) {
                 snapped = snapToRoadAtIntersection(vehicleLat, vehicleLng, targetSpeed, branch)
             }
@@ -825,8 +826,8 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             nearIntersection = true
             lastIntersectionTime = System.currentTimeMillis()
 
-            // 尝试匹配分支（使用平滑指南针）
-            val branch = matchBranchAtIntersection(vehicleLat, vehicleLng, smoothedCompassBearing)
+            // 尝试匹配分支（使用 GPS 航向）
+            val branch = matchBranchAtIntersection(vehicleLat, vehicleLng, vehicleBearing)
             if (branch != null) {
                 matchedBranchHeading = branch.heading
                 branchLockFrames++
@@ -858,7 +859,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
      * IMU 惯导推进
      *
      * GPS 每 500ms~1s 来一次，中间用惯导填充：
-     * - 航向：EMA 平滑后的指南针 + 死区过滤
+     * - 航向：纯 GPS 航向 + 死区过滤
      * - 路口增强：在路口附近且匹配到分支时，惯导航向偏向分支朝向
      * - 速度：GPS 到达时锁定，GPS 丢失后指数衰减
      * - 加速度计：检测运动状态，静止时冻结航向和位置
@@ -875,17 +876,16 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         )
         val isStationary = accMag < FREEZE_ACC_THRESHOLD && speedKmh < FREEZE_SPEED_THRESHOLD
 
-        // 静止时不推进（避免指南针抖动导致位置漂移）
+        // 静止时不推进
         if (isStationary) return
 
-        // ── 航向选择 ──
-        var heading = if (hasCompass) smoothedCompassBearing else vehicleBearing
+        // ── 航向：纯 GPS ──
+        var heading = vehicleBearing
 
         // 路口增强：在路口附近且匹配到分支时，将惯导航向向分支朝向混合
-        // 这样转弯后箭头会沿着转入的道路方向推进，而不是被指南针带偏
         if (nearIntersection && !matchedBranchHeading.isNaN() && branchLockFrames > 5) {
             val diff = ((matchedBranchHeading - heading + 540f) % 360f) - 180f
-            // 70% 指南针 + 30% 分支朝向（路口时更信任道路方向）
+            // 70% GPS + 30% 分支朝向（路口时更信任道路方向）
             heading = ((heading + diff * 0.3f) + 360f) % 360f
         }
 
