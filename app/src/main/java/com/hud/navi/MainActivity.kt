@@ -101,12 +101,8 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     /**
      * 构建程序化 HUD 矢量风格
      * 使用 MapTiler 免费矢量瓦片（OpenMapTiles 格式）
-     * 无需 API key，无需外部 style.json
      */
     private fun buildHudStyle(): Style.Builder {
-        // OpenMapTiles 矢量瓦片源
-        // 免费方案：替换为你自己的 MapTiler key（https://cloud.maptiler.com 免费注册）
-        // 或使用任何 OpenMapTiles 兼容的矢量瓦片服务
         val MAPTILER_KEY = "get_your_own_OpIi9IULFDHzALew38wE"
         val tiles = VectorSource("openmaptiles",
             "https://api.maptiler.com/tiles/v3-openmaptiles/tiles.json?key=$MAPTILER_KEY")
@@ -114,94 +110,78 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         return Style.Builder()
             .withSource(tiles)
             // ── 水体 ──
-            .withLayer(FillLayer("water", "openmaptiles").apply {
-                withSourceLayer("water")
-                setProperties(PropertyFactory.fillColor("#0A1628"))
-            })
+            .withLayer(FillLayer("water", "openmaptiles")
+                .withSourceLayer("water")
+                .withProperties(PropertyFactory.fillColor("#0A1628")))
             // ── 陆地覆被 ──
-            .withLayer(FillLayer("landuse", "openmaptiles").apply {
-                withSourceLayer("landuse")
-                setProperties(PropertyFactory.fillColor("#0D0D14"))
-            })
-            // ── 道路（由细到粗分层渲染） ──
-            // 小路与服务道路
-            .withLayer(LineLayer("road-minor", "openmaptiles").apply {
-                withSourceLayer("transportation")
-                filter = Expression.any(
+            .withLayer(FillLayer("landuse", "openmaptiles")
+                .withSourceLayer("landuse")
+                .withProperties(PropertyFactory.fillColor("#0D0D14")))
+            // ── 小路与服务道路 ──
+            .withLayer(LineLayer("road-minor", "openmaptiles")
+                .withSourceLayer("transportation")
+                .withFilter(Expression.any(
                     Expression.eq(Expression.get("class"), Expression.literal("service")),
                     Expression.eq(Expression.get("class"), Expression.literal("path")),
-                    Expression.eq(Expression.get("class"), Expression.literal("track"))
-                )
-                setProperties(
+                    Expression.eq(Expression.get("class"), Expression.literal("track"))))
+                .withProperties(
                     PropertyFactory.lineColor("#2A3540"),
                     PropertyFactory.lineWidth(
                         Expression.interpolate(Expression.linear(), Expression.zoom(),
                             Expression.stop(13, 0.5f),
-                            Expression.stop(18, 3f)))
-                )
-            })
-            // 次要道路
-            .withLayer(LineLayer("road-secondary", "openmaptiles").apply {
-                withSourceLayer("transportation")
-                filter = Expression.any(
+                            Expression.stop(18, 3f)))))
+            // ── 次要道路 ──
+            .withLayer(LineLayer("road-secondary", "openmaptiles")
+                .withSourceLayer("transportation")
+                .withFilter(Expression.any(
                     Expression.eq(Expression.get("class"), Expression.literal("tertiary")),
                     Expression.eq(Expression.get("class"), Expression.literal("secondary")),
-                    Expression.eq(Expression.get("class"), Expression.literal("minor"))
-                )
-                setProperties(
+                    Expression.eq(Expression.get("class"), Expression.literal("minor"))))
+                .withProperties(
                     PropertyFactory.lineColor("#667788"),
                     PropertyFactory.lineWidth(
                         Expression.interpolate(Expression.linear(), Expression.zoom(),
                             Expression.stop(12, 0.8f),
                             Expression.stop(18, 6f))),
                     PropertyFactory.lineCap("round"),
-                    PropertyFactory.lineJoin("round")
-                )
-            })
-            // 主要道路（亮白，Hudway 风格的醒目道路）
-            .withLayer(LineLayer("road-primary", "openmaptiles").apply {
-                withSourceLayer("transportation")
-                filter = Expression.any(
+                    PropertyFactory.lineJoin("round")))
+            // ── 主要道路（亮白，Hudway 风格） ──
+            .withLayer(LineLayer("road-primary", "openmaptiles")
+                .withSourceLayer("transportation")
+                .withFilter(Expression.any(
                     Expression.eq(Expression.get("class"), Expression.literal("primary")),
-                    Expression.eq(Expression.get("class"), Expression.literal("trunk"))
-                )
-                setProperties(
+                    Expression.eq(Expression.get("class"), Expression.literal("trunk"))))
+                .withProperties(
                     PropertyFactory.lineColor("#CCDDEE"),
                     PropertyFactory.lineWidth(
                         Expression.interpolate(Expression.linear(), Expression.zoom(),
                             Expression.stop(10, 1f),
                             Expression.stop(18, 10f))),
                     PropertyFactory.lineCap("round"),
-                    PropertyFactory.lineJoin("round")
-                )
-            })
-            // 高速公路（最亮，青色高亮）
-            .withLayer(LineLayer("road-motorway", "openmaptiles").apply {
-                withSourceLayer("transportation")
-                filter = Expression.eq(Expression.get("class"), Expression.literal("motorway"))
-                setProperties(
+                    PropertyFactory.lineJoin("round")))
+            // ── 高速公路（青色高亮） ──
+            .withLayer(LineLayer("road-motorway", "openmaptiles")
+                .withSourceLayer("transportation")
+                .withFilter(Expression.eq(Expression.get("class"), Expression.literal("motorway")))
+                .withProperties(
                     PropertyFactory.lineColor("#44DDFF"),
                     PropertyFactory.lineWidth(
                         Expression.interpolate(Expression.linear(), Expression.zoom(),
                             Expression.stop(8, 1.5f),
                             Expression.stop(18, 14f))),
                     PropertyFactory.lineCap("round"),
-                    PropertyFactory.lineJoin("round")
-                )
-            })
+                    PropertyFactory.lineJoin("round")))
             // ── 3D 建筑拉伸（Hudway 核心效果） ──
-            .withLayer(FillExtrusionLayer("hud-buildings", "openmaptiles").apply {
-                withSourceLayer("building")
-                setProperties(
+            .withLayer(FillExtrusionLayer("hud-buildings", "openmaptiles")
+                .withSourceLayer("building")
+                .withProperties(
                     PropertyFactory.fillExtrusionColor("#556677"),
                     PropertyFactory.fillExtrusionOpacity(0.9f),
                     PropertyFactory.fillExtrusionBase(0f),
                     PropertyFactory.fillExtrusionHeight(
                         Expression.interpolate(Expression.linear(), Expression.zoom(),
                             Expression.stop(15, 0f),
-                            Expression.stop(15.5, Expression.get("render_height"))))
-                )
-            })
+                            Expression.stop(15.5, Expression.get("render_height"))))))
     }
 
     private fun initMap() {
