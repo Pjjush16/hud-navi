@@ -404,6 +404,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     }
 
 
+    override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContentView(R.layout.activity_main)
