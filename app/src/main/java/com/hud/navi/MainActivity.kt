@@ -32,13 +32,13 @@ import kotlinx.coroutines.launch
 import kotlin.math.*
 
 /**
- * HUD 导航 v9.0 — 追逐式插值 + GPS 抗跳变 + 速度分级吸附
+ * HUD 导航 v9.1 — IMU 惯导 + 无追逐插值
  *
- * v8.2 → v9.0:
- * - 插值方法从"固定时长"改为"追逐式"（指数衰减）：
- *   显示位置持续向 GPS 目标追过去，新数据来了只更新目标不重置动画
- *   追到了就停，没追到新目标来了就接着追
- *   半衰期 400ms：每 400ms 追过剩余距离的一半
+ * v9.0 → v9.1:
+ * - 加入惯性导航（IMU dead reckoning）：GPS 更新间隔内用指南针航向 + GPS 速度推算位置
+ * - 加速度计检测运动状态，静止时抑制指南针抖动
+ * - 去除追逐式指数衰减插值，GPS 到达时箭头瞬移到校正位置
+ * - GPS 间隔内箭头随指南针实时转动，不再有滞后
  */
 class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener {
 
@@ -58,16 +58,29 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var roadFetchJob: Job? = null
 
-    // === GPS 目标（来自滤波器，onLocationChanged 更新） ===
+    // === GPS 目标（GPS 滤波器输出） ===
     private var targetLat = 0.0; private var targetLng = 0.0
     private var targetBearing = 0f; private var targetSpeed = 0f
 
-    // === 显示位置（渲染循环维护，追逐式插值） ===
-    private var displayLat = 0.0; private var displayLng = 0.0
-    private var displayBearing = 0f
+    // === IMU 惯导状态（替代旧的追逐式插值） ===
+    // vehicleLat/vehicleLng 就是当前显示位置，不再区分"目标"和"显示"
+    private var vehicleLat = 0.0; private var vehicleLng = 0.0
+    private var vehicleBearing = 0f
     private var lastFrameTime = 0L
-    private val CHASE_HALF_LIFE_MS = 400.0  // 每 400ms 追过剩余距离的一半
     private val FRAME_MS = 16L
+
+    // 惯导速度：GPS 到达时锁定，GPS 丢失后指数衰减
+    private var imuSpeedKmh = 0f
+    private val VELOCITY_DECAY = 0.995f          // GPS 丢失后每帧速度衰减
+
+    // 传感器原始数据
+    private val accData = FloatArray(3)
+    private val magData = FloatArray(3)
+    private var hasCompass = false
+    private var compassBearing = 0f
+    private val worldAcc = FloatArray(3)         // 世界坐标系加速度（北/东/上）
+    private val smoothedWorldAcc = FloatArray(3) // 平滑后的世界加速度
+    private val ACC_SMOOTH = 0.15f               // 加速度 EMA 平滑系数
 
     // === 状态 ===
     private var gpsFixCount = 0
@@ -75,12 +88,6 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private var lastRoadFetchLat = 0.0
     private var lastRoadFetchLng = 0.0
     private var lastRoadFetchTime = 0L
-
-    // === 传感器 ===
-    private var hasCompass = false
-    private var compassBearing = 0f
-    private val accData = FloatArray(3)
-    private val magData = FloatArray(3)
 
     // === 60fps 渲染循环 ===
     private var renderRunning = false
@@ -96,27 +103,23 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         private const val TAG = "HudNavi"
         private const val ROAD_FETCH_DIST = 150.0
         private const val ROAD_FETCH_INTERVAL = 5000L
+        private const val BEARING_DEAD_ZONE = 0.5f  // 静止时指南针抖动抑制阈值（度）
     }
 
     // === 速度分级吸附参数 ===
-    // (阈值 m, 混合比例 0~1)
     private fun getSnapParams(speedKmh: Float): Pair<Double, Double> {
         return when {
             speedKmh < 5f  -> Pair(0.0, 0.0)     // 0–5: 不吸附
-            speedKmh < 15f -> Pair(30.0, 0.3)     // 5–15: 弱吸附（30m 内，仅偏移 30%）
+            speedKmh < 15f -> Pair(30.0, 0.3)     // 5–15: 弱吸附
             speedKmh < 30f -> Pair(25.0, 0.6)     // 15–30: 中等吸附
             else           -> Pair(20.0, 1.0)     // 30+: 正常吸附
         }
     }
 
-    /**
-     * 速度分级道路吸附
-     * @return 吸附后的 (lat, lng)，null 表示不吸附
-     */
     private fun snapToRoadSpeedAware(lat: Double, lng: Double, speedKmh: Float): Pair<Double, Double>? {
         if (!hudView.hasRoads) return null
         val (threshold, blendRatio) = getSnapParams(speedKmh)
-        if (threshold <= 0.0) return null  // 0–5 km/h: 不吸附
+        if (threshold <= 0.0) return null
 
         var minDist = Double.MAX_VALUE
         var bestLat = lat
@@ -149,8 +152,6 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         }
 
         if (minDist > threshold) return null
-
-        // 混合吸附：blendRatio=1.0 完全贴路，blendRatio=0.3 只修正 30%
         val snappedLat = lat + (bestLat - lat) * blendRatio
         val snappedLng = lng + (bestLng - lng) * blendRatio
         return Pair(snappedLat, snappedLng)
@@ -225,10 +226,14 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         }
         val mag = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
         val acc = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        val linAcc = sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
         if (mag != null && acc != null) {
             sensorManager.registerListener(this, mag, SensorManager.SENSOR_DELAY_GAME)
             sensorManager.registerListener(this, acc, SensorManager.SENSOR_DELAY_GAME)
             hasCompass = true
+        }
+        linAcc?.let {
+            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
         }
         locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER)?.let { onLocationChanged(it) }
             ?: locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)?.let { onLocationChanged(it) }
@@ -246,11 +251,11 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             rawSpeedMs = location.speed,
             accuracy = location.accuracy,
             timestampMs = now
-        ) ?: return  // 被异常点剔除，直接丢弃
+        ) ?: return
 
         val (filteredLat, filteredLng, filteredSpeedKmh) = filtered
 
-        // ── 只更新目标位置，不碰显示位置 ──
+        // ── 更新 GPS 目标 ──
         targetLat = filteredLat
         targetLng = filteredLng
         targetSpeed = filteredSpeedKmh
@@ -260,20 +265,34 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             hasCompass -> compassBearing
             else -> 0f
         }
-        targetBearing = if (targetLat == 0.0) rawBearing
-                        else circularShortest(targetBearing, rawBearing)
+        targetBearing = if (vehicleLat == 0.0) rawBearing
+                        else circularShortest(vehicleBearing, rawBearing)
 
-        // ── 首次定位：显示位置直接跳到目标 ──
-        if (displayLat == 0.0) {
-            displayLat = targetLat
-            displayLng = targetLng
-            displayBearing = targetBearing
+        // ── GPS 到达：瞬移到校正位置（无追逐、无指数平滑） ──
+        if (vehicleLat == 0.0) {
+            // 首次定位
+            vehicleLat = targetLat
+            vehicleLng = targetLng
+            vehicleBearing = targetBearing
             lastFrameTime = now
-            hudView.vehicleLat = displayLat
-            hudView.vehicleLng = displayLng
-            hudView.vehicleBearing = displayBearing
-            hudView.vehicleSpeed = targetSpeed
+        } else {
+            // 后续 GPS：瞬移修正
+            vehicleLat = targetLat
+            vehicleLng = targetLng
         }
+
+        // ── 惯导速度锁定到 GPS 速度 ──
+        imuSpeedKmh = targetSpeed
+
+        // ── 重置加速度平滑（GPS 来了，惯导重新校准） ──
+        smoothedWorldAcc[0] = 0f
+        smoothedWorldAcc[1] = 0f
+        smoothedWorldAcc[2] = 0f
+
+        hudView.vehicleLat = vehicleLat
+        hudView.vehicleLng = vehicleLng
+        hudView.vehicleBearing = vehicleBearing
+        hudView.vehicleSpeed = targetSpeed
 
         tryFetchRoads()
     }
@@ -297,7 +316,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         }
     }
 
-    // === 60fps 追逐式渲染 ===
+    // === 60fps 渲染 + IMU 惯导推进 ===
     private fun updateFrame() {
         if (targetLat == 0.0) return
 
@@ -305,21 +324,20 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         val dt = if (lastFrameTime == 0L) 16.0 else (now - lastFrameTime).toDouble().coerceIn(1.0, 100.0)
         lastFrameTime = now
 
-        // ── 指数衰减追逐 ──
-        // 每 CHASE_HALF_LIFE_MS 毫秒，追过剩余距离的一半
-        // factor=1.0: 瞬间到达  factor≈0: 几乎不动
-        val factor = 1.0 - 2.0.pow(-dt / CHASE_HALF_LIFE_MS)
+        // ── IMU 惯导推进（GPS 间隔内用指南针航向 + 惯导速度推算位置） ──
+        propagateInertial(dt)
 
-        // 位置追逐
-        displayLat += (targetLat - displayLat) * factor
-        displayLng += (targetLng - displayLng) * factor
+        // ── 方向处理 ──
+        if (targetSpeed > 3f) {
+            // GPS 速度足够时用 GPS 航向（更稳定）
+            vehicleBearing = targetBearing
+        } else if (hasCompass) {
+            // 低速/静止时用指南针（实时响应，无滞后）
+            vehicleBearing = compassBearing
+        }
 
-        // 方向追逐（处理 359°→1° 跨越）
-        val bearingDiff = ((targetBearing - displayBearing + 540f) % 360f) - 180f
-        displayBearing = ((displayBearing + bearingDiff * factor.toFloat()) + 360f) % 360f
-
-        // ── 速度分级道路吸附 ──
-        val snapped = snapToRoadSpeedAware(displayLat, displayLng, targetSpeed)
+        // ── 道路吸附 ──
+        val snapped = snapToRoadSpeedAware(vehicleLat, vehicleLng, targetSpeed)
         if (snapped != null) {
             hudView.snappedLat = snapped.first
             hudView.snappedLng = snapped.second
@@ -328,38 +346,103 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             hudView.vehicleLng = snapped.second
         } else {
             hudView.isSnapped = false
-            hudView.vehicleLat = displayLat
-            hudView.vehicleLng = displayLng
+            hudView.vehicleLat = vehicleLat
+            hudView.vehicleLng = vehicleLng
         }
 
-        hudView.vehicleBearing = displayBearing
+        hudView.vehicleBearing = vehicleBearing
         hudView.vehicleSpeed = targetSpeed
         hudView.invalidate()
     }
 
-    /** 角度最短路径目标值（处理 359°→1° 跨越） */
+    /**
+     * IMU 惯导推进
+     *
+     * GPS 每 500ms~1s 来一次，中间用惯导填充：
+     * - 航向：指南针实时（已校正磁偏角）
+     * - 速度：GPS 到达时锁定，GPS 丢失后指数衰减
+     * - 加速度计：检测运动状态，静止时抑制指南针抖动
+     *
+     * 不加入指数平滑（喷水器），位置变化由惯导自然产生平滑轨迹
+     */
+    private fun propagateInertial(dt: Double) {
+        val speedKmh = imuSpeedKmh
+        val speedMs = speedKmh / 3.6
+
+        // ── 加速度计运动检测 ──
+        val accMag = sqrt(
+            worldAcc[0] * worldAcc[0] +
+            worldAcc[1] * worldAcc[1] +
+            worldAcc[2] * worldAcc[2]
+        )
+        val isStationary = accMag < 0.3 && speedKmh < 3f
+
+        // 静止时不推进（避免指南针抖动导致位置漂移）
+        if (isStationary) return
+
+        // 航向使用指南针（实时），静止抖动已被上面过滤
+        val heading = if (hasCompass) compassBearing else vehicleBearing
+        val headingRad = Math.toRadians(heading.toDouble())
+
+        // 位移 = 速度 × 时间
+        val distMeters = speedMs * (dt / 1000.0)
+
+        // 经纬度增量（小角度近似）
+        val dLat = distMeters * cos(headingRad) / 111111.0
+        val dLng = distMeters * sin(headingRad) / (111111.0 * cos(Math.toRadians(vehicleLat)))
+
+        vehicleLat += dLat
+        vehicleLng += dLng
+
+        // ── GPS 丢失后速度自然衰减（模拟减速） ──
+        val timeSinceGps = System.currentTimeMillis() - lastGpsTime
+        if (timeSinceGps > 2000) {
+            imuSpeedKmh *= VELOCITY_DECAY
+        }
+    }
+
     private fun circularShortest(from: Float, to: Float): Float {
         val diff = ((to - from + 540f) % 360f) - 180f
         return (from + diff + 360f) % 360f
     }
 
-    private fun circularLerp(from: Float, to: Float, t: Float): Float {
-        val diff = ((to - from + 540f) % 360f) - 180f
-        return (from + diff * t + 360f) % 360f
-    }
-
     // === 传感器 ===
     override fun onSensorChanged(event: SensorEvent) {
         when (event.sensor.type) {
-            Sensor.TYPE_ACCELEROMETER -> System.arraycopy(event.values, 0, accData, 0, 3)
-            Sensor.TYPE_MAGNETIC_FIELD -> System.arraycopy(event.values, 0, magData, 0, 3)
+            Sensor.TYPE_ACCELEROMETER -> {
+                System.arraycopy(event.values, 0, accData, 0, 3)
+            }
+            Sensor.TYPE_MAGNETIC_FIELD -> {
+                System.arraycopy(event.values, 0, magData, 0, 3)
+            }
+            Sensor.TYPE_LINEAR_ACCELERATION -> {
+                // 线性加速度（已去除重力），旋转到世界坐标系
+                val R = FloatArray(9)
+                val I = FloatArray(9)
+                if (SensorManager.getRotationMatrix(R, I, accData, magData)) {
+                    for (i in 0..2) {
+                        var sum = 0f
+                        for (j in 0..2) {
+                            sum += R[i * 3 + j] * event.values[j]
+                        }
+                        worldAcc[i] = sum
+                    }
+                    // EMA 平滑
+                    for (i in 0..2) {
+                        smoothedWorldAcc[i] += ACC_SMOOTH * (worldAcc[i] - smoothedWorldAcc[i])
+                    }
+                }
+            }
         }
-        val R = FloatArray(9); val I = FloatArray(9)
-        if (SensorManager.getRotationMatrix(R, I, accData, magData)) {
+
+        // 指南针（从加速度计 + 磁力计计算）
+        val R = FloatArray(9); val Im = FloatArray(9)
+        if (SensorManager.getRotationMatrix(R, Im, accData, magData)) {
             val o = FloatArray(3); SensorManager.getOrientation(R, o)
             compassBearing = ((Math.toDegrees(o[0].toDouble()).toFloat() + 360f) % 360f)
         }
     }
+
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
     // === 生命周期 ===
