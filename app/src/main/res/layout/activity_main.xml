@@ -10,12 +10,23 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent">
 
-        <org.maplibre.android.maps.MapView
-            android:id="@+id/mapView"
+        <!-- 自研 Canvas 绘制引擎 -->
+        <com.hud.navi.HudView
+            android:id="@+id/hudView"
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
 
     </FrameLayout>
+
+    <!-- 方向箭头（屏幕中上） -->
+    <ImageView
+        android:id="@+id/directionArrow"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_gravity="top|center_horizontal"
+        android:layout_marginTop="80dp"
+        android:src="@drawable/ic_arrow_up"
+        android:alpha="0.7" />
 
     <!-- 状态文本（左上角） -->
     <TextView
@@ -49,6 +60,50 @@
         android:shadowDy="2"
         android:shadowRadius="4"
         android:text="0 km/h" />
+
+    <!-- 缩放控件（右侧垂直） -->
+    <LinearLayout
+        android:layout_width="44dp"
+        android:layout_height="wrap_content"
+        android:layout_gravity="end|center_vertical"
+        android:layout_marginEnd="12dp"
+        android:orientation="vertical"
+        android:gravity="center_horizontal">
+
+        <TextView
+            android:id="@+id/btnZoomIn"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:gravity="center"
+            android:text="+"
+            android:textColor="#FFFFFF"
+            android:textSize="24sp"
+            android:background="@drawable/btn_bg"
+            android:clickable="true"
+            android:focusable="true" />
+
+        <TextView
+            android:id="@+id/zoomLevel"
+            android:layout_width="40dp"
+            android:layout_height="32dp"
+            android:gravity="center"
+            android:text="16"
+            android:textColor="#88CCFF"
+            android:textSize="14sp" />
+
+        <TextView
+            android:id="@+id/btnZoomOut"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:gravity="center"
+            android:text="-"
+            android:textColor="#FFFFFF"
+            android:textSize="24sp"
+            android:background="@drawable/btn_bg"
+            android:clickable="true"
+            android:focusable="true" />
+
+    </LinearLayout>
 
     <!-- HUD 镜像切换按钮（右上角） -->
     <TextView
