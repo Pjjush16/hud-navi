@@ -27,7 +27,8 @@ class HudView @JvmOverloads constructor(
     var statusText: String = "等待 GPS..."
 
     // === 路网数据 ===
-    private var roadSegments: List<RoadFetcher.RoadSegment> = emptyList()
+    var roadSegments: List<RoadFetcher.RoadSegment> = emptyList()
+        private set
     var hasRoads: Boolean = false
         private set
 
