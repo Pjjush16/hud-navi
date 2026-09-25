@@ -32,14 +32,14 @@ import kotlinx.coroutines.launch
 import kotlin.math.*
 
 /**
- * HUD 导航 v9.2 — 指南针抗抖动（EMA 平滑 + 死区 + GPS 航向优先）
+ * HUD 导航 v9.3 — 路口指南针辅助转向
  *
- * v9.1 → v9.2:
- * - 指南针 EMA 低通滤波（alpha=0.08，重型平滑）消除磁场噪音
- * - 航向死区 2.5°：小于此阈值的变化直接忽略，防止地图抽搐
- * - 圆形 EMA：正确处理 359°→1° 跨越（不会反转 358°）
- * - GPS 速度 > 5 km/h 时强制使用 GPS 航向（比指南针稳定得多）
- * - 静止检测增强：加速度 < 0.5 m/s² 且速度 < 2 km/h 时冻结航向
+ * v9.2 → v9.3:
+ * - 路口检测：识别路网中 2+ 路段共享的交叉点
+ * - 分支朝向计算：每个路口出口方向的方位角
+ * - 指南针匹配：在路口附近用平滑指南针判定用户转入了哪个分支
+ * - 路口吸附增强：路口区域 50m 阈值，优先按方向匹配吸附
+ * - 路口后惯导锁定：转弯完成后沿匹配道路方向继续惯导推进
  */
 class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener {
 
@@ -73,6 +73,13 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     // 惯导速度：GPS 到达时锁定，GPS 丢失后指数衰减
     private var imuSpeedKmh = 0f
     private val VELOCITY_DECAY = 0.995f          // GPS 丢失后每帧速度衰减
+
+    // === 路口检测 + 分支匹配 ===
+    private var intersections: List<IntersectionNode> = emptyList()
+    private var nearIntersection = false
+    private var matchedBranchHeading = Float.NaN  // 匹配到的分支朝向（NaN = 无匹配）
+    private var lastIntersectionTime = 0L         // 上次在路口的时间
+    private var branchLockFrames = 0              // 分支锁定帧数（防抖）
 
     // 传感器原始数据
     private val accData = FloatArray(3)
@@ -112,6 +119,12 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         private const val GPS_BEARING_SPEED = 5f      // GPS 航向优先的速度阈值（km/h）
         private const val FREEZE_ACC_THRESHOLD = 0.5f // 静止冻结的加速度阈值（m/s²）
         private const val FREEZE_SPEED_THRESHOLD = 2f // 静止冻结的速度阈值（km/h）
+        // === 路口检测参数 ===
+        private const val INTERSECTION_NODE_DIST = 15.0  // 端点距离 < 15m 视为同一节点
+        private const val INTERSECTION_DETECT_RADIUS = 50.0  // 路口检测半径（m）
+        private const val BRANCH_SAMPLE_DIST = 30.0  // 分支朝向采样距离（m）
+        private const val BRANCH_HEADING_TOLERANCE = 35f  // 分支匹配角度容差（°）
+        private const val BRANCH_LOCK_MIN_FRAMES = 30  // 分支锁定最少帧数（防抖 0.5s）
     }
 
     // === 速度分级吸附参数 ===
@@ -165,7 +178,232 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         return Pair(snappedLat, snappedLng)
     }
 
-    override fun onCreate(savedInstanceState: Bundle?) {
+    // ═══════════════════════════════════════════════════════
+    // 路口检测 + 指南针分支匹配
+    // ═══════════════════════════════════════════════════════
+
+    /**
+     * 路口节点：多个路段共享的交叉点
+     * @param lat 路口纬度
+     * @param lng 路口经度
+     * @param branches 从路口出发的各分支（段起点方向 + 采样点）
+     */
+    data class IntersectionNode(
+        val lat: Double,
+        val lng: Double,
+        val branches: List<BranchInfo>
+    )
+
+    /**
+     * 分支信息：从路口出发的一个方向
+     * @param heading 该分支的起始朝向（度，0=北）
+     * @param segmentIdx 所属路段索引
+     * @param pointIdx 该分支在路段中的起始点索引
+     * @param nextLat 采样点纬度（路口后 30m 处）
+     * @param nextLng 采样点经度
+     */
+    data class BranchInfo(
+        val heading: Float,
+        val segmentIdx: Int,
+        val pointIdx: Int,
+        val nextLat: Double,
+        val nextLng: Double
+    )
+
+    /**
+     * 构建路口节点列表（在路网数据更新时调用）
+     *
+     * 算法：
+     * 1. 收集所有路段的端点
+     * 2. 距离 < 15m 的端点合并为同一节点
+     * 3. 有 2+ 路段共享的节点 = 路口
+     * 4. 从路口出发计算每个分支的朝向（沿路段走 30m 采样）
+     */
+    private fun buildIntersections(segments: List<RoadFetcher.RoadSegment>): List<IntersectionNode> {
+        if (segments.isEmpty()) return emptyList()
+
+        // 1. 收集所有端点 → (lat, lng, segmentIdx, pointIdx)
+        val endpoints = mutableListOf<Triple<Double, Double, Pair<Int, Int>>>()
+        for ((sIdx, seg) in segments.withIndex()) {
+            if (seg.points.size < 2) continue
+            // 只取路段的首尾端点
+            endpoints.add(Triple(seg.points.first().first, seg.points.first().second, Pair(sIdx, 0)))
+            endpoints.add(Triple(seg.points.last().first, seg.points.last().second, Pair(sIdx, seg.points.size - 1)))
+        }
+
+        // 2. 聚类：距离 < 15m 的端点合并
+        val used = BooleanArray(endpoints.size)
+        val clusters = mutableListOf<List<Triple<Double, Double, Pair<Int, Int>>>>()
+
+        for (i in endpoints.indices) {
+            if (used[i]) continue
+            val cluster = mutableListOf(endpoints[i])
+            used[i] = true
+            for (j in i + 1 until endpoints.size) {
+                if (used[j]) continue
+                val d = RoadFetcher.haversine(endpoints[i].first, endpoints[i].second,
+                    endpoints[j].first, endpoints[j].second)
+                if (d < INTERSECTION_NODE_DIST) {
+                    cluster.add(endpoints[j])
+                    used[j] = true
+                }
+            }
+            clusters.add(cluster)
+        }
+
+        // 3. 筛选 2+ 不同路段共享的节点 = 路口
+        val result = mutableListOf<IntersectionNode>()
+        for (cluster in clusters) {
+            val distinctSegments = cluster.map { it.third.first }.toSet()
+            if (distinctSegments.size < 2) continue
+
+            // 路口坐标 = 聚类中心
+            val centerLat = cluster.map { it.first }.average()
+            val centerLng = cluster.map { it.second }.average()
+
+            // 4. 计算每个分支的朝向
+            val branches = mutableListOf<BranchInfo>()
+            for (ep in cluster) {
+                val sIdx = ep.third.first
+                val pIdx = ep.third.second
+                val seg = segments[sIdx]
+
+                // 确定前进方向：从端点向路段内部走
+                val forwardIdx = when {
+                    pIdx == 0 && seg.points.size > 1 -> 1  // 端点是起点，向前看第二个点
+                    pIdx == seg.points.size - 1 && seg.points.size > 1 -> pIdx - 1  // 端点是终点，向后看
+                    else -> continue
+                }
+
+                val (fromLat, fromLng) = seg.points[pIdx]
+                val (toLat, toLng) = seg.points[forwardIdx]
+
+                // 计算朝向
+                val heading = bearingBetween(fromLat, fromLng, toLat, toLng)
+
+                // 如果是端点是终点（backward），需要翻转方向
+                val finalHeading = if (pIdx > 0 && pIdx == seg.points.size - 1) {
+                    (heading + 180f) % 360f
+                } else heading
+
+                // 采样点：从路口沿分支方向走 30m
+                val headingRad = Math.toRadians(finalHeading.toDouble())
+                val sampleLat = centerLat + BRANCH_SAMPLE_DIST * cos(headingRad) / 111111.0
+                val sampleLng = centerLng + BRANCH_SAMPLE_DIST * sin(headingRad) / (111111.0 * cos(Math.toRadians(centerLat)))
+
+                branches.add(BranchInfo(finalHeading, sIdx, pIdx, sampleLat, sampleLng))
+            }
+
+            if (branches.size >= 2) {
+                result.add(IntersectionNode(centerLat, centerLng, branches))
+            }
+        }
+
+        Log.i(TAG, "Built ${result.size} intersection nodes from ${segments.size} segments")
+        return result
+    }
+
+    /**
+     * 在路口附近时，用指南针匹配用户转入的分支
+     *
+     * @return 匹配到的分支信息，或 null（无匹配）
+     */
+    private fun matchBranchAtIntersection(
+        lat: Double, lng: Double, compass: Float
+    ): BranchInfo? {
+        if (!nearIntersection || !hasCompass) return null
+
+        // 找最近的路口
+        var nearestInt: IntersectionNode? = null
+        var nearestDist = Double.MAX_VALUE
+        for (inter in intersections) {
+            val d = RoadFetcher.haversine(lat, lng, inter.lat, inter.lng)
+            if (d < nearestDist) {
+                nearestDist = d
+                nearestInt = inter
+            }
+        }
+        if (nearestInt == null || nearestDist > INTERSECTION_DETECT_RADIUS) return null
+
+        // 在路口各分支中找最匹配指南针的
+        var bestBranch: BranchInfo? = null
+        var bestDiff = Float.MAX_VALUE
+        for (branch in nearestInt.branches) {
+            val diff = abs(((branch.heading - compass + 540f) % 360f) - 180f)
+            if (diff < bestDiff) {
+                bestDiff = diff
+                bestBranch = branch
+            }
+        }
+
+        // 容差检查：最佳匹配的角度差不能太大
+        if (bestBranch == null || bestDiff > BRANCH_HEADING_TOLERANCE) return null
+
+        return bestBranch
+    }
+
+    /**
+     * 路口增强的道路吸附
+     * 在路口附近优先按匹配分支方向吸附，而不是简单最近距离
+     */
+    private fun snapToRoadAtIntersection(
+        lat: Double, lng: Double, speedKmh: Float, branch: BranchInfo
+    ): Pair<Double, Double>? {
+        if (!hudView.hasRoads) return null
+
+        val segment = hudView.roadSegments.getOrNull(branch.segmentIdx) ?: return null
+        val points = segment.points
+        if (points.size < 2) return null
+
+        // 在匹配分支所属路段上做投影吸附
+        var minDist = Double.MAX_VALUE
+        var bestLat = lat
+        var bestLng = lng
+
+        for (i in 0 until points.size - 1) {
+            val (lat1, lng1) = points[i]
+            val (lat2, lng2) = points[i + 1]
+
+            val dx = lng2 - lng1
+            val dy = lat2 - lat1
+            val lenSq = dx * dx + dy * dy
+            if (lenSq < 1e-12) continue
+
+            val t = ((lng - lng1) * dx + (lat - lat1) * dy) / lenSq
+            val clampedT = t.coerceIn(0.0, 1.0)
+
+            val projLat = lat1 + clampedT * dy
+            val projLng = lng1 + clampedT * dx
+
+            val dist = RoadFetcher.haversine(lat, lng, projLat, projLng)
+            if (dist < minDist) {
+                minDist = dist
+                bestLat = projLat
+                bestLng = projLng
+            }
+        }
+
+        // 路口附近阈值放宽到 50m，混合比 80%（强吸附到匹配分支）
+        if (minDist > INTERSECTION_DETECT_RADIUS) return null
+        val blendRatio = 0.8
+        val snappedLat = lat + (bestLat - lat) * blendRatio
+        val snappedLng = lng + (bestLng - lng) * blendRatio
+        return Pair(snappedLat, snappedLng)
+    }
+
+    /**
+     * 两点之间的方位角（度，0=北，顺时针）
+     */
+    private fun bearingBetween(lat1: Double, lng1: Double, lat2: Double, lng2: Double): Float {
+        val dLng = lng2 - lng1
+        val y = sin(Math.toRadians(dLng)) * cos(Math.toRadians(lat2))
+        val x = cos(Math.toRadians(lat1)) * sin(Math.toRadians(lat2)) -
+                sin(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) * cos(Math.toRadians(dLng))
+        val bearing = Math.toDegrees(atan2(y, x))
+        return ((bearing.toFloat() + 360f) % 360f)
+    }
+
+
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContentView(R.layout.activity_main)
@@ -319,7 +557,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             roadFetchJob = scope.launch {
                 val segments = RoadFetcher.fetchRoads(targetLat, targetLng)
                 hudView.setRoads(segments, targetLat, targetLng)
-                Log.i(TAG, "Roads: ${segments.size} segments")
+                // 路网更新后重建路口节点
+                intersections = buildIntersections(segments)
+                Log.i(TAG, "Roads: ${segments.size} segments, ${intersections.size} intersections")
             }
         }
     }
@@ -332,11 +572,20 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         val dt = if (lastFrameTime == 0L) 16.0 else (now - lastFrameTime).toDouble().coerceIn(1.0, 100.0)
         lastFrameTime = now
 
+        // ── 路口检测 ──
+        detectIntersection()
+
         // ── IMU 惯导推进（GPS 间隔内用指南针航向 + 惯导速度推算位置） ──
         propagateInertial(dt)
 
-        // ── 方向处理（抗抖动核心） ──
+        // ── 方向处理（抗抖动核心 + 路口分支锁定） ──
         val newBearing = when {
+            // 在路口且匹配到分支 → 优先跟随分支朝向
+            nearIntersection && !matchedBranchHeading.isNaN() -> {
+                val diff = ((matchedBranchHeading - vehicleBearing + 540f) % 360f) - 180f
+                if (abs(diff) < HEADING_DEAD_ZONE) vehicleBearing
+                else vehicleBearing + diff * 0.6f  // 路口处稍微更积极地跟上分支方向
+            }
             // GPS 速度足够 → 强制用 GPS 航向（比指南针稳定得多）
             targetSpeed > GPS_BEARING_SPEED -> targetBearing
             // 有指南针 → 用 EMA 平滑后的指南针 + 死区过滤
@@ -349,8 +598,19 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         }
         vehicleBearing = ((newBearing % 360f) + 360f) % 360f
 
-        // ── 道路吸附 ──
-        val snapped = snapToRoadSpeedAware(vehicleLat, vehicleLng, targetSpeed)
+        // ── 道路吸附（路口增强） ──
+        // 优先尝试路口分支吸附，失败则回退到普通速度分级吸附
+        var snapped: Pair<Double, Double>? = null
+        if (nearIntersection && !matchedBranchHeading.isNaN()) {
+            val branch = matchBranchAtIntersection(vehicleLat, vehicleLng, smoothedCompassBearing)
+            if (branch != null) {
+                snapped = snapToRoadAtIntersection(vehicleLat, vehicleLng, targetSpeed, branch)
+            }
+        }
+        if (snapped == null) {
+            snapped = snapToRoadSpeedAware(vehicleLat, vehicleLng, targetSpeed)
+        }
+
         if (snapped != null) {
             hudView.snappedLat = snapped.first
             hudView.snappedLng = snapped.second
@@ -369,10 +629,67 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     }
 
     /**
+     * 路口检测（每帧调用）
+     *
+     * 检测当前位置是否在任何路口的 50m 范围内，
+     * 如果是，尝试用指南针匹配转入的分支。
+     */
+    private fun detectIntersection() {
+        if (intersections.isEmpty()) {
+            nearIntersection = false
+            matchedBranchHeading = Float.NaN
+            return
+        }
+
+        // 检查是否在任何路口附近
+        var inIntersection = false
+        for (inter in intersections) {
+            val d = RoadFetcher.haversine(vehicleLat, vehicleLng, inter.lat, inter.lng)
+            if (d < INTERSECTION_DETECT_RADIUS) {
+                inIntersection = true
+                break
+            }
+        }
+
+        if (inIntersection) {
+            nearIntersection = true
+            lastIntersectionTime = System.currentTimeMillis()
+
+            // 尝试匹配分支（使用平滑指南针）
+            val branch = matchBranchAtIntersection(vehicleLat, vehicleLng, smoothedCompassBearing)
+            if (branch != null) {
+                matchedBranchHeading = branch.heading
+                branchLockFrames++
+                Log.d(TAG, "Intersection branch matched: ${branch.heading.toInt()}° (lock=$branchLockFrames)")
+            } else {
+                // 未匹配到分支，但仍在路口
+                if (branchLockFrames < BRANCH_LOCK_MIN_FRAMES) {
+                    matchedBranchHeading = Float.NaN
+                }
+            }
+        } else {
+            // 离开路口后，保持一段锁定（防抖）
+            if (nearIntersection && branchLockFrames > 0) {
+                branchLockFrames--
+                if (branchLockFrames == 0) {
+                    nearIntersection = false
+                    matchedBranchHeading = Float.NaN
+                    Log.d(TAG, "Left intersection, branch lock released")
+                }
+            } else {
+                nearIntersection = false
+                matchedBranchHeading = Float.NaN
+                branchLockFrames = 0
+            }
+        }
+    }
+
+    /**
      * IMU 惯导推进
      *
      * GPS 每 500ms~1s 来一次，中间用惯导填充：
      * - 航向：EMA 平滑后的指南针 + 死区过滤
+     * - 路口增强：在路口附近且匹配到分支时，惯导航向偏向分支朝向
      * - 速度：GPS 到达时锁定，GPS 丢失后指数衰减
      * - 加速度计：检测运动状态，静止时冻结航向和位置
      */
@@ -391,8 +708,17 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         // 静止时不推进（避免指南针抖动导致位置漂移）
         if (isStationary) return
 
-        // 航向使用 EMA 平滑后的指南针（不是原始值）
-        val heading = if (hasCompass) smoothedCompassBearing else vehicleBearing
+        // ── 航向选择 ──
+        var heading = if (hasCompass) smoothedCompassBearing else vehicleBearing
+
+        // 路口增强：在路口附近且匹配到分支时，将惯导航向向分支朝向混合
+        // 这样转弯后箭头会沿着转入的道路方向推进，而不是被指南针带偏
+        if (nearIntersection && !matchedBranchHeading.isNaN() && branchLockFrames > 5) {
+            val diff = ((matchedBranchHeading - heading + 540f) % 360f) - 180f
+            // 70% 指南针 + 30% 分支朝向（路口时更信任道路方向）
+            heading = ((heading + diff * 0.3f) + 360f) % 360f
+        }
+
         val headingRad = Math.toRadians(heading.toDouble())
 
         // 位移 = 速度 × 时间
