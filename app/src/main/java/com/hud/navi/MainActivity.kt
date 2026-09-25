@@ -32,13 +32,14 @@ import kotlinx.coroutines.launch
 import kotlin.math.*
 
 /**
- * HUD 导航 v9.1 — IMU 惯导 + 无追逐插值
+ * HUD 导航 v9.2 — 指南针抗抖动（EMA 平滑 + 死区 + GPS 航向优先）
  *
- * v9.0 → v9.1:
- * - 加入惯性导航（IMU dead reckoning）：GPS 更新间隔内用指南针航向 + GPS 速度推算位置
- * - 加速度计检测运动状态，静止时抑制指南针抖动
- * - 去除追逐式指数衰减插值，GPS 到达时箭头瞬移到校正位置
- * - GPS 间隔内箭头随指南针实时转动，不再有滞后
+ * v9.1 → v9.2:
+ * - 指南针 EMA 低通滤波（alpha=0.08，重型平滑）消除磁场噪音
+ * - 航向死区 2.5°：小于此阈值的变化直接忽略，防止地图抽搐
+ * - 圆形 EMA：正确处理 359°→1° 跨越（不会反转 358°）
+ * - GPS 速度 > 5 km/h 时强制使用 GPS 航向（比指南针稳定得多）
+ * - 静止检测增强：加速度 < 0.5 m/s² 且速度 < 2 km/h 时冻结航向
  */
 class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener {
 
@@ -77,7 +78,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private val accData = FloatArray(3)
     private val magData = FloatArray(3)
     private var hasCompass = false
-    private var compassBearing = 0f
+    private var compassBearing = 0f              // 指南针原始值（不直接使用）
+    private var smoothedCompassBearing = 0f      // EMA 平滑后的指南针
+    private var compassInitialized = false       // 首次初始化标记
     private val worldAcc = FloatArray(3)         // 世界坐标系加速度（北/东/上）
     private val smoothedWorldAcc = FloatArray(3) // 平滑后的世界加速度
     private val ACC_SMOOTH = 0.15f               // 加速度 EMA 平滑系数
@@ -103,7 +106,12 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         private const val TAG = "HudNavi"
         private const val ROAD_FETCH_DIST = 150.0
         private const val ROAD_FETCH_INTERVAL = 5000L
-        private const val BEARING_DEAD_ZONE = 0.5f  // 静止时指南针抖动抑制阈值（度）
+        // === 指南针抗抖动参数 ===
+        private const val COMPASS_EMA_ALPHA = 0.08f   // EMA 平滑系数（越小越平滑，0.05~0.15）
+        private const val HEADING_DEAD_ZONE = 2.5f    // 航向死区（度）：小于此变化直接忽略
+        private const val GPS_BEARING_SPEED = 5f      // GPS 航向优先的速度阈值（km/h）
+        private const val FREEZE_ACC_THRESHOLD = 0.5f // 静止冻结的加速度阈值（m/s²）
+        private const val FREEZE_SPEED_THRESHOLD = 2f // 静止冻结的速度阈值（km/h）
     }
 
     // === 速度分级吸附参数 ===
@@ -262,7 +270,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
         val rawBearing = when {
             location.hasBearing() && location.speed > 1f -> location.bearing
-            hasCompass -> compassBearing
+            hasCompass -> smoothedCompassBearing  // 使用平滑后的指南针
             else -> 0f
         }
         targetBearing = if (vehicleLat == 0.0) rawBearing
@@ -327,14 +335,19 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         // ── IMU 惯导推进（GPS 间隔内用指南针航向 + 惯导速度推算位置） ──
         propagateInertial(dt)
 
-        // ── 方向处理 ──
-        if (targetSpeed > 3f) {
-            // GPS 速度足够时用 GPS 航向（更稳定）
-            vehicleBearing = targetBearing
-        } else if (hasCompass) {
-            // 低速/静止时用指南针（实时响应，无滞后）
-            vehicleBearing = compassBearing
+        // ── 方向处理（抗抖动核心） ──
+        val newBearing = when {
+            // GPS 速度足够 → 强制用 GPS 航向（比指南针稳定得多）
+            targetSpeed > GPS_BEARING_SPEED -> targetBearing
+            // 有指南针 → 用 EMA 平滑后的指南针 + 死区过滤
+            hasCompass -> {
+                val diff = ((smoothedCompassBearing - vehicleBearing + 540f) % 360f) - 180f
+                if (abs(diff) < HEADING_DEAD_ZONE) vehicleBearing  // 死区内：不动
+                else vehicleBearing + diff * 0.5f  // 死区外：半速过渡（进一步平滑）
+            }
+            else -> vehicleBearing
         }
+        vehicleBearing = ((newBearing % 360f) + 360f) % 360f
 
         // ── 道路吸附 ──
         val snapped = snapToRoadSpeedAware(vehicleLat, vehicleLng, targetSpeed)
@@ -359,11 +372,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
      * IMU 惯导推进
      *
      * GPS 每 500ms~1s 来一次，中间用惯导填充：
-     * - 航向：指南针实时（已校正磁偏角）
+     * - 航向：EMA 平滑后的指南针 + 死区过滤
      * - 速度：GPS 到达时锁定，GPS 丢失后指数衰减
-     * - 加速度计：检测运动状态，静止时抑制指南针抖动
-     *
-     * 不加入指数平滑（喷水器），位置变化由惯导自然产生平滑轨迹
+     * - 加速度计：检测运动状态，静止时冻结航向和位置
      */
     private fun propagateInertial(dt: Double) {
         val speedKmh = imuSpeedKmh
@@ -375,13 +386,13 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             worldAcc[1] * worldAcc[1] +
             worldAcc[2] * worldAcc[2]
         )
-        val isStationary = accMag < 0.3 && speedKmh < 3f
+        val isStationary = accMag < FREEZE_ACC_THRESHOLD && speedKmh < FREEZE_SPEED_THRESHOLD
 
         // 静止时不推进（避免指南针抖动导致位置漂移）
         if (isStationary) return
 
-        // 航向使用指南针（实时），静止抖动已被上面过滤
-        val heading = if (hasCompass) compassBearing else vehicleBearing
+        // 航向使用 EMA 平滑后的指南针（不是原始值）
+        val heading = if (hasCompass) smoothedCompassBearing else vehicleBearing
         val headingRad = Math.toRadians(heading.toDouble())
 
         // 位移 = 速度 × 时间
@@ -435,11 +446,22 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             }
         }
 
-        // 指南针（从加速度计 + 磁力计计算）
+        // 指南针（从加速度计 + 磁力计计算）— EMA 平滑 + 圆形处理
         val R = FloatArray(9); val Im = FloatArray(9)
         if (SensorManager.getRotationMatrix(R, Im, accData, magData)) {
             val o = FloatArray(3); SensorManager.getOrientation(R, o)
-            compassBearing = ((Math.toDegrees(o[0].toDouble()).toFloat() + 360f) % 360f)
+            val rawBearing = ((Math.toDegrees(o[0].toDouble()).toFloat() + 360f) % 360f)
+
+            if (!compassInitialized) {
+                // 首次：直接赋值，不滤波
+                smoothedCompassBearing = rawBearing
+                compassInitialized = true
+            } else {
+                // 圆形 EMA：处理 359°→1° 跨越
+                val diff = ((rawBearing - smoothedCompassBearing + 540f) % 360f) - 180f
+                smoothedCompassBearing = ((smoothedCompassBearing + COMPASS_EMA_ALPHA * diff) + 360f) % 360f
+            }
+            compassBearing = rawBearing  // 保留原始值供调试，实际使用 smoothedCompassBearing
         }
     }
 
