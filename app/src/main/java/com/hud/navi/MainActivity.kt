@@ -32,14 +32,13 @@ import kotlinx.coroutines.launch
 import kotlin.math.*
 
 /**
- * HUD 导航 v8.2 — 极简 HUD + GPS 抗跳变 + 速度分级吸附
+ * HUD 导航 v9.0 — 追逐式插值 + GPS 抗跳变 + 速度分级吸附
  *
- * v8.1 → v8.2:
- * - 速度分级吸附策略：
- *   0–5 km/h：不吸附（可能静止/倒车/停车调整）
- *   5–15 km/h：弱吸附（GPS 漂移明显，不能强行贴路），阈值 30m，混合 30%
- *   15–30 km/h：中等吸附（有方向趋势），阈值 25m，混合 60%
- *   30+ km/h：正常吸附（运动方向稳定），阈值 20m，混合 100%
+ * v8.2 → v9.0:
+ * - 插值方法从"固定时长"改为"追逐式"（指数衰减）：
+ *   显示位置持续向 GPS 目标追过去，新数据来了只更新目标不重置动画
+ *   追到了就停，没追到新目标来了就接着追
+ *   半衰期 400ms：每 400ms 追过剩余距离的一半
  */
 class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener {
 
@@ -59,13 +58,15 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var roadFetchJob: Job? = null
 
-    // === GPS 插值 ===
-    private var prevLat = 0.0; private var prevLng = 0.0
-    private var prevBearing = 0f; private var prevSpeed = 0f; private var prevTime = 0L
-    private var currLat = 0.0; private var currLng = 0.0
-    private var currBearing = 0f; private var currSpeed = 0f; private var currTime = 0L
-    private val INTERP_MS = 800L
-    private val BEARING_SMOOTH = 0.15f
+    // === GPS 目标（来自滤波器，onLocationChanged 更新） ===
+    private var targetLat = 0.0; private var targetLng = 0.0
+    private var targetBearing = 0f; private var targetSpeed = 0f
+
+    // === 显示位置（渲染循环维护，追逐式插值） ===
+    private var displayLat = 0.0; private var displayLng = 0.0
+    private var displayBearing = 0f
+    private var lastFrameTime = 0L
+    private val CHASE_HALF_LIFE_MS = 400.0  // 每 400ms 追过剩余距离的一半
     private val FRAME_MS = 16L
 
     // === 状态 ===
@@ -249,36 +250,38 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
         val (filteredLat, filteredLng, filteredSpeedKmh) = filtered
 
-        if (currLat != 0.0) {
-            prevLat = currLat; prevLng = currLng
-            prevBearing = currBearing; prevSpeed = currSpeed; prevTime = currTime
-        }
-        currLat = filteredLat
-        currLng = filteredLng
-        currSpeed = filteredSpeedKmh
+        // ── 只更新目标位置，不碰显示位置 ──
+        targetLat = filteredLat
+        targetLng = filteredLng
+        targetSpeed = filteredSpeedKmh
+
         val rawBearing = when {
             location.hasBearing() && location.speed > 1f -> location.bearing
             hasCompass -> compassBearing
             else -> 0f
         }
-        currBearing = if (currLat == 0.0) rawBearing
-                      else circularLerp(currBearing, rawBearing, BEARING_SMOOTH)
-        currTime = now
+        targetBearing = if (targetLat == 0.0) rawBearing
+                        else circularShortest(targetBearing, rawBearing)
 
-        if (prevLat == 0.0) {
-            prevLat = currLat; prevLng = currLng
-            prevBearing = currBearing; prevSpeed = currSpeed; prevTime = currTime
-            hudView.vehicleLat = currLat; hudView.vehicleLng = currLng
-            hudView.vehicleBearing = currBearing; hudView.vehicleSpeed = currSpeed
+        // ── 首次定位：显示位置直接跳到目标 ──
+        if (displayLat == 0.0) {
+            displayLat = targetLat
+            displayLng = targetLng
+            displayBearing = targetBearing
+            lastFrameTime = now
+            hudView.vehicleLat = displayLat
+            hudView.vehicleLng = displayLng
+            hudView.vehicleBearing = displayBearing
+            hudView.vehicleSpeed = targetSpeed
         }
 
         tryFetchRoads()
     }
 
     private fun tryFetchRoads() {
-        if (currLat == 0.0) return
+        if (targetLat == 0.0) return
         val now = System.currentTimeMillis()
-        val dist = RoadFetcher.haversine(currLat, currLng, lastRoadFetchLat, lastRoadFetchLng)
+        val dist = RoadFetcher.haversine(targetLat, targetLng, lastRoadFetchLat, lastRoadFetchLng)
         val timeSince = now - lastRoadFetchTime
 
         if (dist > ROAD_FETCH_DIST || (timeSince > ROAD_FETCH_INTERVAL && !RoadFetcher.isCacheValid(currLat, currLng))) {
@@ -294,25 +297,29 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         }
     }
 
-    // === 60fps 渲染 ===
+    // === 60fps 追逐式渲染 ===
     private fun updateFrame() {
-        if (currLat == 0.0) return
+        if (targetLat == 0.0) return
 
-        val elapsed = System.currentTimeMillis() - currTime
-        val (iLat, iLng, iBearing) = if (prevLat == 0.0 || elapsed >= INTERP_MS) {
-            Triple(currLat, currLng, currBearing)
-        } else {
-            val t = (elapsed.toFloat() / INTERP_MS).coerceIn(0f, 1f)
-            val et = 1f - (1f - t) * (1f - t)
-            Triple(
-                prevLat + (currLat - prevLat) * et,
-                prevLng + (currLng - prevLng) * et,
-                circularLerp(prevBearing, currBearing, et)
-            )
-        }
+        val now = System.currentTimeMillis()
+        val dt = if (lastFrameTime == 0L) 16.0 else (now - lastFrameTime).toDouble().coerceIn(1.0, 100.0)
+        lastFrameTime = now
 
-        // 速度分级道路吸附
-        val snapped = snapToRoadSpeedAware(iLat, iLng, currSpeed)
+        // ── 指数衰减追逐 ──
+        // 每 CHASE_HALF_LIFE_MS 毫秒，追过剩余距离的一半
+        // factor=1.0: 瞬间到达  factor≈0: 几乎不动
+        val factor = 1.0 - 2.0.pow(-dt / CHASE_HALF_LIFE_MS)
+
+        // 位置追逐
+        displayLat += (targetLat - displayLat) * factor
+        displayLng += (targetLng - displayLng) * factor
+
+        // 方向追逐（处理 359°→1° 跨越）
+        val bearingDiff = ((targetBearing - displayBearing + 540f) % 360f) - 180f
+        displayBearing = ((displayBearing + bearingDiff * factor.toFloat()) + 360f) % 360f
+
+        // ── 速度分级道路吸附 ──
+        val snapped = snapToRoadSpeedAware(displayLat, displayLng, targetSpeed)
         if (snapped != null) {
             hudView.snappedLat = snapped.first
             hudView.snappedLng = snapped.second
@@ -321,13 +328,19 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             hudView.vehicleLng = snapped.second
         } else {
             hudView.isSnapped = false
-            hudView.vehicleLat = iLat
-            hudView.vehicleLng = iLng
+            hudView.vehicleLat = displayLat
+            hudView.vehicleLng = displayLng
         }
 
-        hudView.vehicleBearing = iBearing
-        hudView.vehicleSpeed = currSpeed
+        hudView.vehicleBearing = displayBearing
+        hudView.vehicleSpeed = targetSpeed
         hudView.invalidate()
+    }
+
+    /** 角度最短路径目标值（处理 359°→1° 跨越） */
+    private fun circularShortest(from: Float, to: Float): Float {
+        val diff = ((to - from + 540f) % 360f) - 180f
+        return (from + diff + 360f) % 360f
     }
 
     private fun circularLerp(from: Float, to: Float, t: Float): Float {
