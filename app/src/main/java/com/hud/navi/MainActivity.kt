@@ -62,6 +62,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     // === GPS 目标（GPS 滤波器输出） ===
     private var targetLat = 0.0; private var targetLng = 0.0
     private var targetBearing = 0f; private var targetSpeed = 0f
+    private var gpsAccuracy = 10f  // GPS 精度（米），用于 HMM sigma 自适应
 
     // === IMU 惯导状态（替代旧的追逐式插值） ===
     // vehicleLat/vehicleLng 就是当前显示位置，不再区分"目标"和"显示"
@@ -127,57 +128,82 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         private const val BRANCH_LOCK_MIN_FRAMES = 30  // 分支锁定最少帧数（防抖 0.5s）
     }
 
-    // === 速度分级吸附参数 ===
-    // 吸附状态（滞后机制，防止边缘抖动）
-    private var snapLocked = false              // 当前是否处于吸附锁定状态
-    private var snapLockFrames = 0              // 已锁定帧数
-    private val SNAP_LOCK_MIN_FRAMES = 60       // 最少锁定 60 帧（1s），防止闪断
-    private val SNAP_HYSTERESIS_RATIO = 1.5     // 脱锁阈值 = 吸锁阈值 × 1.5
+    // ═══════════════════════════════════════════════════════
+    // HMM 地图匹配（替代阈值吸附，从根源消除抖动）
+    // ═══════════════════════════════════════════════════════
+    //
+    // 核心原理（Newson & Krumm 2009，高德/百度/Google 通用方案）：
+    //
+    // 每个 GPS 点 = 一个观测值
+    // 附近的路段 = 隐状态（候选）
+    // 发射概率 = GPS 到路段的距离（高斯分布，sigma = GPS 精度）
+    // 转移概率 = 停留在同一路段 vs 切换到其他路段
+    // 选综合概率最高的路段 → 天然无抖动
+    //
+    // 为什么不抖：
+    // - GPS 漂移时：当前路段的发射概率仍然最高（因为距离没变多少）
+    // - 转移到其他路段的概率很低（转移惩罚）→ 不会跳来跳去
+    // - 真正转弯时：方向明显改变 + 路口处转移概率高 → 自然切换
+    // - 没有阈值/滞后/锁定帧这些 hack，概率模型自带平滑
 
-    private fun getSnapParams(speedKmh: Float): Pair<Double, Double> {
-        return when {
-            speedKmh < 5f  -> Pair(0.0, 0.0)     // 0–5: 不吸附
-            speedKmh < 15f -> Pair(30.0, 0.3)     // 5–15: 弱吸附
-            speedKmh < 30f -> Pair(25.0, 0.6)     // 15–30: 中等吸附
-            else           -> Pair(20.0, 1.0)     // 30+: 正常吸附
-        }
-    }
+    private var matchedSegIdx = -1              // 当前匹配的路段索引（-1 = 无）
+    private var matchedProjLat = 0.0            // 匹配路段上的投影点
+    private var matchedProjLng = 0.0
+    private var hmmConfidence = 0.0             // 匹配置信度（0~1）
+    private val HMM_SIGMA = 10.0                // GPS 精度标准差（米），用于高斯发射概率
+    private val HMM_STAY_BONUS = 3.0            // 停留在同一路段的概率加成（ln 空间）
+    private val HMM_SEARCH_RADIUS = 50.0        // 候选搜索半径（米）
+    private val HMM_MIN_CONFIDENCE = 0.1        // 最低匹配置信度，低于此不吸附
+    private val HMM_SPEED_GATE = 3f             // 速度低于此不做 HMM（静止不匹配）
 
     /**
-     * 速度分级道路吸附（带滞后防抖）
+     * HMM 地图匹配 — 对一次 GPS 更新执行
      *
-     * 滞后机制：
-     * - 吸锁阈值 = getSnapParams 返回值（如 20m）
-     * - 脱锁阈值 = 吸锁阈值 × 1.5（如 30m）
-     * - 一旦锁定，至少保持 SNAP_LOCK_MIN_FRAMES 帧（1s），防止反复开关
-     * - 锁定期间即使飘到脱锁阈值外，仍然保持吸附
-     * - 锁定帧数够且飘出脱锁阈值 → 释放锁定
+     * @param lat GPS 纬度
+     * @param lng GPS 经度
+     * @param speedKmh GPS 速度
+     * @param bearing 当前航向（度）
+     * @param accuracy GPS 精度（米），用于动态调整 sigma
+     * @return 匹配后的 (lat, lng) 或 null（不匹配）
      */
-    private fun snapToRoadSpeedAware(lat: Double, lng: Double, speedKmh: Float): Pair<Double, Double>? {
+    private fun hmmMapMatch(
+        lat: Double, lng: Double, speedKmh: Float,
+        bearing: Float, accuracy: Float
+    ): Pair<Double, Double>? {
         if (!hudView.hasRoads) {
-            snapLocked = false
-            snapLockFrames = 0
+            matchedSegIdx = -1
+            hmmConfidence = 0.0
             return null
         }
-        val (baseThreshold, blendRatio) = getSnapParams(speedKmh)
-        if (baseThreshold <= 0.0) {
-            // 低速不吸附，但如果之前锁定了，平滑释放
-            snapLocked = false
-            snapLockFrames = 0
+        // 低速不匹配（静止/步行时 GPS 噪声太大，匹配没有意义）
+        if (speedKmh < HMM_SPEED_GATE) {
+            // 但不立即清除匹配，保持最后匹配状态
             return null
         }
 
-        // 脱锁阈值比吸锁阈值宽 50%（滞后带）
-        val lockThreshold = baseThreshold       // 进入吸附的距离
-        val unlockThreshold = baseThreshold * SNAP_HYSTERESIS_RATIO  // 脱离吸附的距离
+        val sigma = maxOf(HMM_SIGMA, accuracy.toDouble())  // 动态 sigma
+        val sigma2 = 2.0 * sigma * sigma
 
-        // 计算到最近道路的投影距离
-        var minDist = Double.MAX_VALUE
-        var bestLat = lat
-        var bestLng = lng
+        // ── 1. 收集候选路段 ──
+        data class Candidate(
+            val segIdx: Int,
+            val projLat: Double,
+            val projLng: Double,
+            val dist: Double,       // GPS 到投影点的距离
+            val segHeading: Float   // 路段在投影点处的朝向
+        )
 
-        for (segment in hudView.roadSegments) {
-            val points = segment.points
+        val candidates = mutableListOf<Candidate>()
+        val segments = hudView.roadSegments
+
+        for ((sIdx, seg) in segments.withIndex()) {
+            val points = seg.points
+            var segMinDist = Double.MAX_VALUE
+            var segBestPLat = 0.0
+            var segBestPLng = 0.0
+            var segBestHeading = 0f
+            var segBestIdx = 0
+
             for (i in 0 until points.size - 1) {
                 val (lat1, lng1) = points[i]
                 val (lat2, lng2) = points[i + 1]
@@ -194,56 +220,108 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 val projLng = lng1 + clampedT * dx
 
                 val dist = RoadFetcher.haversine(lat, lng, projLat, projLng)
-                if (dist < minDist) {
-                    minDist = dist
-                    bestLat = projLat
-                    bestLng = projLng
+                if (dist < segMinDist) {
+                    segMinDist = dist
+                    segBestPLat = projLat
+                    segBestPLng = projLng
+                    segBestHeading = bearingBetween(lat1, lng1, lat2, lng2)
+                    segBestIdx = i
                 }
             }
+
+            if (segMinDist <= HMM_SEARCH_RADIUS) {
+                candidates.add(Candidate(sIdx, segBestPLat, segBestPLng, segMinDist, segBestHeading))
+            }
         }
 
-        // ── 滞后状态机 ──
-        val inLockRange = minDist <= lockThreshold
-        val inUnlockRange = minDist > unlockThreshold
-
-        when {
-            // 已锁定 + 仍在锁定范围内 → 保持锁定，刷新帧计数
-            snapLocked && !inUnlockRange -> {
-                snapLockFrames++
-            }
-            // 已锁定 + 飘出脱锁范围 + 锁定帧数够 → 释放
-            snapLocked && inUnlockRange && snapLockFrames >= SNAP_LOCK_MIN_FRAMES -> {
-                snapLocked = false
-                snapLockFrames = 0
-            }
-            // 已锁定 + 飘出脱锁范围 + 锁定帧数不够 → 强制保持锁定
-            snapLocked && inUnlockRange && snapLockFrames < SNAP_LOCK_MIN_FRAMES -> {
-                snapLockFrames++
-                // 不释放，继续吸附
-            }
-            // 未锁定 + 进入吸锁范围 → 锁定
-            !snapLocked && inLockRange -> {
-                snapLocked = true
-                snapLockFrames = 0
-            }
-            // 未锁定 + 在滞后带内（lockThreshold < dist < unlockThreshold） → 不操作
-            // 未锁定 + 超出脱锁范围 → 不吸附
+        if (candidates.isEmpty()) {
+            matchedSegIdx = -1
+            hmmConfidence = 0.0
+            return null
         }
 
-        if (!snapLocked) return null
+        // ── 2. 计算每个候选的综合得分（ln 概率空间，避免浮点下溢） ──
+        var bestScore = Double.NEGATIVE_INFINITY
+        var bestCandidate: Candidate? = null
 
-        // 吸附：按混合比修正位置
-        // 锁定期间如果距离变远，混合比动态降低（避免把箭头拉到太远的路上）
-        val effectiveBlend = if (minDist > lockThreshold) {
-            // 在滞后带内：随距离增大逐渐减弱混合比
-            val fade = ((unlockThreshold - minDist) / (unlockThreshold - lockThreshold)).coerceIn(0.0, 1.0)
-            blendRatio * fade
-        } else {
-            blendRatio
+        for (cand in candidates) {
+            // 发射概率（高斯）：距离越近概率越高
+            // ln(P_emit) = -d² / (2σ²)
+            val lnEmit = -(cand.dist * cand.dist) / sigma2
+
+            // 转移概率：
+            // - 停留在同一路段：加分（stay bonus）
+            // - 切换到不同路段：距离越远惩罚越大
+            val lnTransit = if (matchedSegIdx == -1) {
+                // 首次匹配：无偏好
+                0.0
+            } else if (cand.segIdx == matchedSegIdx) {
+                // 同一路段：加分（倾向于不切换）
+                HMM_STAY_BONUS
+            } else {
+                // 不同路段：惩罚（距离当前匹配点越远惩罚越大）
+                val switchDist = RoadFetcher.haversine(
+                    matchedProjLat, matchedProjLng, cand.projLat, cand.projLng
+                )
+                // 切换惩罚：每 10m 扣 1 分（ln 空间）
+                -switchDist / 10.0
+            }
+
+            // 方向一致性加成（如果航向与路段方向一致，加分）
+            val headingDiff = abs(((cand.segHeading - bearing + 540f) % 360f) - 180f)
+            val headingBonus = if (headingDiff < 45f) {
+                // 方向一致：最多加 1.5 分
+                1.5 * (1.0 - headingDiff / 45.0)
+            } else if (headingDiff > 135f) {
+                // 方向相反：扣分（不太可能在反方向行驶）
+                -1.0
+            } else {
+                0.0
+            }
+
+            val totalScore = lnEmit + lnTransit + headingBonus
+
+            if (totalScore > bestScore) {
+                bestScore = totalScore
+                bestCandidate = cand
+            }
         }
 
-        val snappedLat = lat + (bestLat - lat) * effectiveBlend
-        val snappedLng = lng + (bestLng - lng) * effectiveBlend
+        if (bestCandidate == null) {
+            matchedSegIdx = -1
+            hmmConfidence = 0.0
+            return null
+        }
+
+        // ── 3. 计算置信度（将 ln 概率转换为 0~1 的置信度） ──
+        // 置信度 = 最佳候选概率 / 所有候选概率之和
+        val bestEmit = exp(-(bestCandidate.dist * bestCandidate.dist) / sigma2)
+        var totalEmit = 0.0
+        for (cand in candidates) {
+            totalEmit += exp(-(cand.dist * cand.dist) / sigma2)
+        }
+        hmmConfidence = if (totalEmit > 0) bestEmit / totalEmit else 0.0
+
+        if (hmmConfidence < HMM_MIN_CONFIDENCE) {
+            // 置信度太低，不吸附
+            matchedSegIdx = -1
+            return null
+        }
+
+        // ── 4. 更新匹配状态 ──
+        matchedSegIdx = bestCandidate.segIdx
+        matchedProjLat = bestCandidate.projLat
+        matchedProjLng = bestCandidate.projLng
+
+        // ── 5. 计算混合比（基于置信度和距离） ──
+        // 置信度高 + 距离近 → 完全吸附到路段
+        // 置信度低 + 距离远 → 保留更多 GPS 原始位置
+        val distFade = maxOf(0.0, 1.0 - bestCandidate.dist / HMM_SEARCH_RADIUS)
+        val blendRatio = (hmmConfidence * distFade).coerceIn(0.0, 1.0)
+
+        val snappedLat = lat + (bestCandidate.projLat - lat) * blendRatio
+        val snappedLng = lng + (bestCandidate.projLng - lng) * blendRatio
+
         return Pair(snappedLat, snappedLng)
     }
 
@@ -575,6 +653,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         targetLat = filteredLat
         targetLng = filteredLng
         targetSpeed = filteredSpeedKmh
+        gpsAccuracy = location.accuracy
 
         val rawBearing = when {
             location.hasBearing() && location.speed > 1f -> location.bearing
@@ -668,8 +747,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         }
         vehicleBearing = ((newBearing % 360f) + 360f) % 360f
 
-        // ── 道路吸附（路口增强） ──
-        // 优先尝试路口分支吸附，失败则回退到普通速度分级吸附
+        // ── 道路吸附（HMM 地图匹配 + 路口增强） ──
+        // HMM 是主吸附引擎：概率模型天然无抖动，不需要阈值/滞后/锁定帧
+        // 路口分支匹配作为补充：在路口处用指南针辅助判断转入方向
         var snapped: Pair<Double, Double>? = null
         if (nearIntersection && !matchedBranchHeading.isNaN()) {
             val branch = matchBranchAtIntersection(vehicleLat, vehicleLng, smoothedCompassBearing)
@@ -677,8 +757,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 snapped = snapToRoadAtIntersection(vehicleLat, vehicleLng, targetSpeed, branch)
             }
         }
+        // HMM 匹配（替代旧的阈值吸附）
         if (snapped == null) {
-            snapped = snapToRoadSpeedAware(vehicleLat, vehicleLng, targetSpeed)
+            snapped = hmmMapMatch(vehicleLat, vehicleLng, targetSpeed, vehicleBearing, gpsAccuracy)
         }
 
         if (snapped != null) {
