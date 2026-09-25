@@ -629,7 +629,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         }
 
         hudView.vehicleBearing = vehicleBearing
-        hudView.vehicleSpeed = targetSpeed
+        hudView.vehicleSpeed = (ekf.speed * 3.6).toFloat()  // m/s → km/h，用 EKF 积分速度
         hudView.statusText = ekf.getStatusString()
         hudView.invalidate()
     }
