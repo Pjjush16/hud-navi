@@ -51,14 +51,18 @@ import kotlinx.coroutines.launch
 import kotlin.math.*
 
 /**
- * HUD 导航 v9.3 — 路口指南针辅助转向
+ * HUD 导航 v10.0 — EKF 卡尔曼融合惯导（高德式"后端融合"）
  *
- * v9.2 → v9.3:
- * - 路口检测：识别路网中 2+ 路段共享的交叉点
- * - 分支朝向计算：每个路口出口方向的方位角
- * - 指南针匹配：在路口附近用平滑指南针判定用户转入了哪个分支
- * - 路口吸附增强：路口区域 50m 阈值，优先按方向匹配吸附
- * - 路口后惯导锁定：转弯完成后沿匹配道路方向继续惯导推进
+ * v9.8 → v10.0:
+ * - 用 EKF 卡尔曼滤波替代速度制追赶（chase）
+ * - "后端融合"模式：IMU 推算的经纬度是主位置，GPS 只在偏差大时校正
+ * - GPS 丢失后 IMU 继续推算，速度自然衰减
+ * - 卡尔曼增益 K 动态调节：GPS 好→多信 GPS，GPS 差→多信 IMU
+ * - 位置不确定度 σ 驱动 HMM sigma 自适应
+ *
+ * 学自高德车机版 v9.5.0 逆向分析：
+ * com.amap.location.fusion.LocationProvider（后端融合模式）
+ * com.amap.location.support.security.gnssrtk.SatSol（KalmanFilter）
  */
 class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener {
 
@@ -70,6 +74,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     // === GPS 抗跳变滤波器 ===
     private val gpsFilter = GpsFilter()
 
+    // === EKF 卡尔曼融合惯导引擎（高德式"后端融合"） ===
+    private val ekf = EkfDeadReckoning()
+
     // === UI（仅权限重试） ===
     private lateinit var flipContainer: FrameLayout
     private lateinit var permDeniedLayout: LinearLayout
@@ -78,22 +85,16 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var roadFetchJob: Job? = null
 
-    // === GPS 目标（GPS 滤波器输出） ===
+    // === GPS 目标（GPS 滤波器输出，供 EKF 观测更新） ===
     private var targetLat = 0.0; private var targetLng = 0.0
     private var targetBearing = 0f; private var targetSpeed = 0f
     private var gpsAccuracy = 10f  // GPS 精度（米），用于 HMM sigma 自适应
 
-    // === IMU 惯导状态（替代旧的追逐式插值） ===
-    // vehicleLat/vehicleLng 就是当前显示位置，不再区分"目标"和"显示"
+    // === 车辆状态（由 EKF 输出驱动） ===
     private var vehicleLat = 0.0; private var vehicleLng = 0.0
     private var vehicleBearing = 0f
     private var lastFrameTime = 0L
     private val FRAME_MS = 16L
-
-    // === 速度制位置追赶（学自 chase-game InterpolatedLocationProvider） ===
-    private val CHASE_SPEED_MPS = 15.0           // 追赶速度（15 m/s ≈ 54 km/h）
-    private val CHASE_MAX_DISP_M = 200.0         // 单帧最大位移（米），防切后台回来一帧跨半个地图
-    private val CHASE_SNAP_DIST = 0.5            // 距离 < 0.5m 时直接吸附到目标
 
     // === 路口检测 + 分支匹配 ===
     private var intersections: List<IntersectionNode> = emptyList()
@@ -175,175 +176,6 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private val HMM_SEARCH_RADIUS = 50.0        // 候选搜索半径（米）
     private val HMM_MIN_CONFIDENCE = 0.1        // 最低匹配置信度，低于此不吸附
     private val HMM_SPEED_GATE = 3f             // 速度低于此不做 HMM（静止不匹配）
-
-    /**
-     * HMM 地图匹配 — 对一次 GPS 更新执行
-     *
-     * @param lat GPS 纬度
-     * @param lng GPS 经度
-     * @param speedKmh GPS 速度
-     * @param bearing 当前航向（度）
-     * @param accuracy GPS 精度（米），用于动态调整 sigma
-     * @return 匹配后的 (lat, lng) 或 null（不匹配）
-     */
-    private fun hmmMapMatch(
-        lat: Double, lng: Double, speedKmh: Float,
-        bearing: Float, accuracy: Float
-    ): Pair<Double, Double>? {
-        if (!hudView.hasRoads) {
-            matchedSegIdx = -1
-            hmmConfidence = 0.0
-            return null
-        }
-        // 低速不匹配（静止/步行时 GPS 噪声太大，匹配没有意义）
-        if (speedKmh < HMM_SPEED_GATE) {
-            // 但不立即清除匹配，保持最后匹配状态
-            return null
-        }
-
-        val sigma = maxOf(HMM_SIGMA, accuracy.toDouble())  // 动态 sigma
-        val sigma2 = 2.0 * sigma * sigma
-
-        // ── 1. 收集候选路段 ──
-        data class Candidate(
-            val segIdx: Int,
-            val projLat: Double,
-            val projLng: Double,
-            val dist: Double,       // GPS 到投影点的距离
-            val segHeading: Float   // 路段在投影点处的朝向
-        )
-
-        val candidates = mutableListOf<Candidate>()
-        val segments = hudView.roadSegments
-
-        for ((sIdx, seg) in segments.withIndex()) {
-            val points = seg.points
-            var segMinDist = Double.MAX_VALUE
-            var segBestPLat = 0.0
-            var segBestPLng = 0.0
-            var segBestHeading = 0f
-            var segBestIdx = 0
-
-            for (i in 0 until points.size - 1) {
-                val (lat1, lng1) = points[i]
-                val (lat2, lng2) = points[i + 1]
-
-                val dx = lng2 - lng1
-                val dy = lat2 - lat1
-                val lenSq = dx * dx + dy * dy
-                if (lenSq < 1e-12) continue
-
-                val t = ((lng - lng1) * dx + (lat - lat1) * dy) / lenSq
-                val clampedT = t.coerceIn(0.0, 1.0)
-
-                val projLat = lat1 + clampedT * dy
-                val projLng = lng1 + clampedT * dx
-
-                val dist = RoadFetcher.haversine(lat, lng, projLat, projLng)
-                if (dist < segMinDist) {
-                    segMinDist = dist
-                    segBestPLat = projLat
-                    segBestPLng = projLng
-                    segBestHeading = bearingBetween(lat1, lng1, lat2, lng2)
-                    segBestIdx = i
-                }
-            }
-
-            if (segMinDist <= HMM_SEARCH_RADIUS) {
-                candidates.add(Candidate(sIdx, segBestPLat, segBestPLng, segMinDist, segBestHeading))
-            }
-        }
-
-        if (candidates.isEmpty()) {
-            matchedSegIdx = -1
-            hmmConfidence = 0.0
-            return null
-        }
-
-        // ── 2. 计算每个候选的综合得分（ln 概率空间，避免浮点下溢） ──
-        var bestScore = Double.NEGATIVE_INFINITY
-        var bestCandidate: Candidate? = null
-
-        for (cand in candidates) {
-            // 发射概率（高斯）：距离越近概率越高
-            // ln(P_emit) = -d² / (2σ²)
-            val lnEmit = -(cand.dist * cand.dist) / sigma2
-
-            // 转移概率：
-            // - 停留在同一路段：加分（stay bonus）
-            // - 切换到不同路段：距离越远惩罚越大
-            val lnTransit = if (matchedSegIdx == -1) {
-                // 首次匹配：无偏好
-                0.0
-            } else if (cand.segIdx == matchedSegIdx) {
-                // 同一路段：加分（倾向于不切换）
-                HMM_STAY_BONUS
-            } else {
-                // 不同路段：惩罚（距离当前匹配点越远惩罚越大）
-                val switchDist = RoadFetcher.haversine(
-                    matchedProjLat, matchedProjLng, cand.projLat, cand.projLng
-                )
-                // 切换惩罚：每 10m 扣 1 分（ln 空间）
-                -switchDist / 10.0
-            }
-
-            // 方向一致性加成（如果航向与路段方向一致，加分）
-            val headingDiff = abs(((cand.segHeading - bearing + 540f) % 360f) - 180f)
-            val headingBonus = if (headingDiff < 45f) {
-                // 方向一致：最多加 1.5 分
-                1.5 * (1.0 - headingDiff / 45.0)
-            } else if (headingDiff > 135f) {
-                // 方向相反：扣分（不太可能在反方向行驶）
-                -1.0
-            } else {
-                0.0
-            }
-
-            val totalScore = lnEmit + lnTransit + headingBonus
-
-            if (totalScore > bestScore) {
-                bestScore = totalScore
-                bestCandidate = cand
-            }
-        }
-
-        if (bestCandidate == null) {
-            matchedSegIdx = -1
-            hmmConfidence = 0.0
-            return null
-        }
-
-        // ── 3. 计算置信度（将 ln 概率转换为 0~1 的置信度） ──
-        // 置信度 = 最佳候选概率 / 所有候选概率之和
-        val bestEmit = exp(-(bestCandidate.dist * bestCandidate.dist) / sigma2)
-        var totalEmit = 0.0
-        for (cand in candidates) {
-            totalEmit += exp(-(cand.dist * cand.dist) / sigma2)
-        }
-        hmmConfidence = if (totalEmit > 0) bestEmit / totalEmit else 0.0
-
-        if (hmmConfidence < HMM_MIN_CONFIDENCE) {
-            // 置信度太低，不吸附
-            matchedSegIdx = -1
-            return null
-        }
-
-        // ── 4. 更新匹配状态 ──
-        matchedSegIdx = bestCandidate.segIdx
-        matchedProjLat = bestCandidate.projLat
-        matchedProjLng = bestCandidate.projLng
-
-        // ── 5. 计算混合比（基于置信度和距离） ──
-        // 置信度高 + 距离近 → 完全吸附到路段
-        // 置信度低 + 距离远 → 保留更多 GPS 原始位置
-        val distFade = maxOf(0.0, 1.0 - bestCandidate.dist / HMM_SEARCH_RADIUS)
-        val blendRatio = (hmmConfidence * distFade).coerceIn(0.0, 1.0)
-
-        val snappedLat = lat + (bestCandidate.projLat - lat) * blendRatio
-        val snappedLng = lng + (bestCandidate.projLng - lng) * blendRatio
-
-        return Pair(snappedLat, snappedLng)
-    }
 
     // ═══════════════════════════════════════════════════════
     // 路口检测 + 指南针分支匹配
@@ -669,7 +501,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
         val (filteredLat, filteredLng, filteredSpeedKmh) = filtered
 
-        // ── 更新 GPS 目标 ──
+        // ── 更新 GPS 目标（供 EKF 观测更新和方向处理使用） ──
         targetLat = filteredLat
         targetLng = filteredLng
         targetSpeed = filteredSpeedKmh
@@ -679,26 +511,26 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         val rawBearing = if (location.hasBearing() && location.speed > 0.5f) {
             location.bearing
         } else {
-            // 低速/静止：保持上一次航向（避免无方向时的跳变）
-            vehicleBearing
+            vehicleBearing  // 低速/静止保持上次航向
         }
         targetBearing = if (vehicleLat == 0.0) rawBearing
                         else circularShortest(vehicleBearing, rawBearing)
 
-        // ── GPS 到达：首次定位瞬移，后续只更新 target（由 updateFrame 追赶） ──
-        if (vehicleLat == 0.0) {
-            // 首次定位
-            vehicleLat = targetLat
-            vehicleLng = targetLng
-            vehicleBearing = targetBearing
+        // ── EKF 更新：GPS 观测校正 ──
+        if (!ekf.initialized) {
+            ekf.initialize(filteredLat, filteredLng, rawBearing, location.speed, now)
+            vehicleLat = ekf.lat
+            vehicleLng = ekf.lng
+            vehicleBearing = ekf.heading.toFloat()
             lastFrameTime = now
+        } else {
+            // GPS 到达 → EKF 观测更新（卡尔曼增益动态调节信 GPS 多少）
+            ekf.update(filteredLat, filteredLng, location.accuracy, now)
         }
-        // 后续 GPS：不瞬移，targetLat/targetLng 已在上面更新，由 chaseTargetPosition 追赶
 
-        // ── 重置加速度平滑（GPS 来了，惯导重新校准） ──
-        smoothedWorldAcc[0] = 0f
-        smoothedWorldAcc[1] = 0f
-        smoothedWorldAcc[2] = 0f
+        // 从 EKF 读取校正后的位置（这就是"主位置"）
+        vehicleLat = ekf.lat
+        vehicleLng = ekf.lng
 
         hudView.vehicleLat = vehicleLat
         hudView.vehicleLng = vehicleLng
@@ -729,19 +561,24 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         }
     }
 
-    // === 60fps 渲染 + IMU 惯导推进 ===
+    // === 60fps 渲染 + EKF 惯导推算 ===
     private fun updateFrame() {
         if (targetLat == 0.0) return
 
         val now = System.currentTimeMillis()
-        val dt = if (lastFrameTime == 0L) 16.0 else (now - lastFrameTime).toDouble().coerceIn(1.0, 100.0)
+        val dt = if (lastFrameTime == 0L) 16L else (now - lastFrameTime).coerceIn(1L, 100L)
         lastFrameTime = now
 
         // ── 路口检测 ──
         detectIntersection()
 
-        // ── 速度制位置追赶（学自 chase-game InterpolatedLocationProvider） ──
-        chaseTargetPosition(dt)
+        // ── EKF 预测步：IMU 惯导推算（每帧前推位置） ──
+        // 这是高德"后端融合"的核心：predict 的输出就是显示位置
+        ekf.predict(dt, vehicleBearing, targetSpeed * 1000f / 3600f)  // km/h → m/s
+
+        // 从 EKF 读取推算位置
+        vehicleLat = ekf.lat
+        vehicleLng = ekf.lng
 
         // ── 方向处理（纯 GPS 航向 + 死区 + 路口分支锁定） ──
         val newBearing = when {
@@ -763,8 +600,10 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         vehicleBearing = ((newBearing % 360f) + 360f) % 360f
 
         // ── 道路吸附（HMM 地图匹配 + 路口增强） ──
-        // HMM 是主吸附引擎：概率模型天然无抖动，不需要阈值/滞后/锁定帧
-        // 路口分支匹配作为补充：在路口处用 GPS 航向辅助判断转入方向
+        // 用 EKF 位置不确定度动态调整 HMM sigma
+        val ekfUncertainty = ekf.getPositionUncertainty()
+        val adaptiveSigma = maxOf(HMM_SIGMA, ekfUncertainty)
+
         var snapped: Pair<Double, Double>? = null
         if (nearIntersection && !matchedBranchHeading.isNaN()) {
             val branch = matchBranchAtIntersection(vehicleLat, vehicleLng, vehicleBearing)
@@ -772,9 +611,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 snapped = snapToRoadAtIntersection(vehicleLat, vehicleLng, targetSpeed, branch)
             }
         }
-        // HMM 匹配（替代旧的阈值吸附）
+        // HMM 匹配（sigma 由 EKF 不确定度驱动）
         if (snapped == null) {
-            snapped = hmmMapMatch(vehicleLat, vehicleLng, targetSpeed, vehicleBearing, gpsAccuracy)
+            snapped = hmmMapMatchWithSigma(vehicleLat, vehicleLng, targetSpeed, vehicleBearing, adaptiveSigma)
         }
 
         if (snapped != null) {
@@ -791,6 +630,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
         hudView.vehicleBearing = vehicleBearing
         hudView.vehicleSpeed = targetSpeed
+        hudView.statusText = ekf.getStatusString()
         hudView.invalidate()
     }
 
@@ -851,55 +691,122 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     }
 
     /**
-     * 速度制位置追赶（学自 chase-game InterpolatedLocationProvider v5.0.0）
-     *
-     * 每帧从 vehicleLat/Lng 朝 targetLat/Lng 移动：
-     * - 速度固定 CHASE_SPEED_MPS（15 m/s ≈ 54 km/h），跟帧率无关
-     * - 单帧位移上限 CHASE_MAX_DISP_M（200m），防切后台回来一帧跨半个地图
-     * - 距离 < 0.5m 时直接吸附，避免永远差一点点
+     * HMM 地图匹配（EKF sigma 自适应版本）
      */
-    private fun chaseTargetPosition(dt: Double) {
-        val dtSec = dt / 1000.0
-
-        // 当前显示位置到 GPS 目标的距离（米）
-        val distToTarget = RoadFetcher.haversine(vehicleLat, vehicleLng, targetLat, targetLng)
-
-        if (distToTarget > CHASE_SNAP_DIST) {
-            // 本帧允许的最大位移 = 速度 × dt
-            var maxDisp = CHASE_SPEED_MPS * dtSec
-            // 钳制：单帧最大位移
-            maxDisp = maxDisp.coerceAtMost(CHASE_MAX_DISP_M)
-
-            // 实际移动距离 = min(到目标的距离, 本帧最大位移)
-            val moveDistance = distToTarget.coerceAtMost(maxDisp)
-
-            // 朝目标方向移动
-            val bearing = bearingBetween(vehicleLat, vehicleLng, targetLat, targetLng)
-            val result = movePoint(vehicleLat, vehicleLng, bearing.toDouble(), moveDistance)
-            vehicleLat = result[0]
-            vehicleLng = result[1]
-        } else {
-            // 足够近，直接吸附
-            vehicleLat = targetLat
-            vehicleLng = targetLng
+    private fun hmmMapMatchWithSigma(
+        lat: Double, lng: Double, speedKmh: Float,
+        bearing: Float, sigma: Double
+    ): Pair<Double, Double>? {
+        if (!hudView.hasRoads) {
+            matchedSegIdx = -1
+            hmmConfidence = 0.0
+            return null
         }
-    }
+        if (speedKmh < HMM_SPEED_GATE) return null
 
-    /**
-     * 从一点沿给定方向移动指定距离（米），返回 [lat, lng]
-     */
-    private fun movePoint(lat: Double, lng: Double, bearingDeg: Double, distM: Double): DoubleArray {
-        val R = 6371000.0
-        val d = distM / R
-        val brng = Math.toRadians(bearingDeg)
-        val lat1 = Math.toRadians(lat)
-        val lng1 = Math.toRadians(lng)
-        val lat2 = asin(sin(lat1) * cos(d) + cos(lat1) * sin(d) * cos(brng))
-        val lng2 = lng1 + atan2(
-            sin(brng) * sin(d) * cos(lat1),
-            cos(d) - sin(lat1) * sin(lat2)
+        val effectiveSigma = maxOf(sigma, 5.0)  // 最小 5m
+        val sigma2 = 2.0 * effectiveSigma * effectiveSigma
+
+        data class Candidate(
+            val segIdx: Int,
+            val projLat: Double,
+            val projLng: Double,
+            val dist: Double,
+            val segHeading: Float
         )
-        return doubleArrayOf(Math.toDegrees(lat2), Math.toDegrees(lng2))
+
+        val candidates = mutableListOf<Candidate>()
+        val segments = hudView.roadSegments
+
+        for ((sIdx, seg) in segments.withIndex()) {
+            val points = seg.points
+            var segMinDist = Double.MAX_VALUE
+            var segBestPLat = 0.0
+            var segBestPLng = 0.0
+            var segBestHeading = 0f
+
+            for (i in 0 until points.size - 1) {
+                val (lat1, lng1) = points[i]
+                val (lat2, lng2) = points[i + 1]
+
+                val dx = lng2 - lng1
+                val dy = lat2 - lat1
+                val lenSq = dx * dx + dy * dy
+                if (lenSq < 1e-12) continue
+
+                val t = ((lng - lng1) * dx + (lat - lat1) * dy) / lenSq
+                val clampedT = t.coerceIn(0.0, 1.0)
+
+                val projLat = lat1 + clampedT * dy
+                val projLng = lng1 + clampedT * dx
+
+                val dist = RoadFetcher.haversine(lat, lng, projLat, projLng)
+                if (dist < segMinDist) {
+                    segMinDist = dist
+                    segBestPLat = projLat
+                    segBestPLng = projLng
+                    segBestHeading = bearingBetween(lat1, lng1, lat2, lng2)
+                }
+            }
+
+            if (segMinDist <= HMM_SEARCH_RADIUS) {
+                candidates.add(Candidate(sIdx, segBestPLat, segBestPLng, segMinDist, segBestHeading))
+            }
+        }
+
+        if (candidates.isEmpty()) {
+            matchedSegIdx = -1; hmmConfidence = 0.0; return null
+        }
+
+        var bestScore = Double.NEGATIVE_INFINITY
+        var bestCandidate: Candidate? = null
+
+        for (cand in candidates) {
+            val lnEmit = -(cand.dist * cand.dist) / sigma2
+            val lnTransit = when {
+                matchedSegIdx == -1 -> 0.0
+                cand.segIdx == matchedSegIdx -> HMM_STAY_BONUS
+                else -> {
+                    val switchDist = RoadFetcher.haversine(matchedProjLat, matchedProjLng, cand.projLat, cand.projLng)
+                    -switchDist / 10.0
+                }
+            }
+            val headingDiff = abs(((cand.segHeading - bearing + 540f) % 360f) - 180f)
+            val headingBonus = when {
+                headingDiff < 45f -> 1.5 * (1.0 - headingDiff / 45.0)
+                headingDiff > 135f -> -1.0
+                else -> 0.0
+            }
+            val totalScore = lnEmit + lnTransit + headingBonus
+            if (totalScore > bestScore) { bestScore = totalScore; bestCandidate = cand }
+        }
+
+        if (bestCandidate == null) {
+            matchedSegIdx = -1; hmmConfidence = 0.0; return null
+        }
+
+        val bestEmit = exp(-(bestCandidate.dist * bestCandidate.dist) / sigma2)
+        var totalEmit = 0.0
+        for (cand in candidates) {
+            totalEmit += exp(-(cand.dist * cand.dist) / sigma2)
+        }
+        hmmConfidence = if (totalEmit > 0) bestEmit / totalEmit else 0.0
+
+        if (hmmConfidence < HMM_MIN_CONFIDENCE) {
+            matchedSegIdx = -1; return null
+        }
+
+        matchedSegIdx = bestCandidate.segIdx
+        matchedProjLat = bestCandidate.projLat
+        matchedProjLng = bestCandidate.projLng
+
+        val distFade = maxOf(0.0, 1.0 - bestCandidate.dist / HMM_SEARCH_RADIUS)
+        val blendRatio = (hmmConfidence * distFade).coerceIn(0.0, 1.0)
+
+        val snappedLat = lat + (bestCandidate.projLat - lat) * blendRatio
+        val snappedLng = lng + (bestCandidate.projLng - lng) * blendRatio
+
+        return Pair(snappedLat, snappedLng)
     }
 
     private fun circularShortest(from: Float, to: Float): Float {
