@@ -2,7 +2,7 @@ package com.hud.navi
 
 import android.Manifest
 import android.annotation.SuppressLint
-import android.content.pm.PackageManager
+import android.graphics.Color
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -16,84 +16,256 @@ import android.os.Looper
 import android.util.Log
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
+import com.google.gson.JsonArray
+import com.google.gson.JsonObject
+import org.maplibre.android.MapLibre
+import org.maplibre.android.camera.CameraPosition
+import org.maplibre.android.geometry.LatLng
+import org.maplibre.android.maps.MapView
+import org.maplibre.android.maps.Style
+import org.maplibre.android.style.expressions.Expression
+import org.maplibre.android.style.layers.CircleLayer
+import org.maplibre.android.style.layers.FillExtrusionLayer
+import org.maplibre.android.style.layers.FillLayer
+import org.maplibre.android.style.layers.LineLayer
+import org.maplibre.android.style.layers.PropertyFactory
+import org.maplibre.android.style.sources.GeoJsonSource
+import org.maplibre.android.style.sources.RasterSource
+import org.maplibre.android.style.sources.VectorSource
 import kotlin.math.*
 
 /**
- * HUD 导航 v4.0 — 纯矢量路网 + 黑底 + 45° 透视 + 插值平滑
- * 无任何瓦片地图，专为挡风玻璃 HUD 设计
+ * HUD 导航 v6.0 — MapLibre GL Native 渲染引擎
  *
- * 插值引擎：
- * - 位置：在两次 GPS 更新之间做线性插值，消除跳点
- * - 方向：圆形插值（slerp），避免 359°→1° 走 180° 的问题
- * - 渲染：60fps 定时器驱动，GPS 更新间隔内平滑过渡
+ * 核心变化（相对 v5.x Canvas 方案）：
+ * - 替换自研 Canvas 45° 透视为 MapLibre 原生 3D 相机（pitch=60° + bearing）
+ * - 矢量瓦片（OpenMapTiles）替代 Overpass API + 手动路网查询
+ * - fill-extrusion 3D 建筑拉伸，实现 Hudway 风格立体街区
+ * - 程序化构建 HUD 暗色风格：深黑底 + 白路网 + 灰蓝 3D 建筑
+ * - 保留 GPS/磁力计插值引擎，驱动 MapLibre 相机平滑运动
  */
 class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener {
 
-    private lateinit var hudView: HudView
+    private lateinit var mapView: MapView
     private lateinit var locationManager: LocationManager
     private lateinit var sensorManager: SensorManager
     private val handler = Handler(Looper.getMainLooper())
 
+    private var mapboxMap: org.maplibre.android.maps.MapLibreMap? = null
+    private var mapReady = false
+
     // === 插值引擎 ===
-    // 上一次 GPS 原始数据
-    private var prevLat = 0.0
-    private var prevLng = 0.0
-    private var prevBearing = 0f
-    private var prevSpeed = 0f
-    private var prevTime = 0L
+    private var prevLat = 0.0; private var prevLng = 0.0
+    private var prevBearing = 0f; private var prevSpeed = 0f; private var prevTime = 0L
+    private var currLat = 0.0; private var currLng = 0.0
+    private var currBearing = 0f; private var currSpeed = 0f; private var currTime = 0L
+    private val INTERP_MS = 800L
+    private val BEARING_SMOOTH = 0.15f
+    private val FRAME_MS = 16L
 
-    // 最新一次 GPS 原始数据
-    private var currLat = 0.0
-    private var currLng = 0.0
-    private var currBearing = 0f
-    private var currSpeed = 0f
-    private var currTime = 0L
-
-    // 插值参数
-    private val INTERP_DURATION_MS = 800L  // 插值过渡时间（毫秒）
-    private val BEARING_SMOOTH_FACTOR = 0.15f  // 航向低通滤波系数（越小越平滑）
-
-    // 60fps 渲染循环
-    private val FRAME_INTERVAL_MS = 16L  // ~60fps
+    private var renderRunning = false
     private val renderRunnable = object : Runnable {
         override fun run() {
             updateInterpolation()
-            hudView.invalidate()
-            handler.postDelayed(this, FRAME_INTERVAL_MS)
+            handler.postDelayed(this, FRAME_MS)
         }
     }
-    private var renderRunning = false
 
-    // 路网刷新
-    private var lastFetchLat = 0.0
-    private var lastFetchLng = 0.0
-    private val FETCH_DISTANCE_M = 300.0
-    private var isFetching = false
-
-    // 磁力计
+    // === 传感器 ===
     private var hasCompass = false
     private var compassBearing = 0f
-    private val accelerometer = FloatArray(3)
-    private val magnetometer = FloatArray(3)
+    private val accData = FloatArray(3)
+    private val magData = FloatArray(3)
 
     companion object {
         private const val PERM_REQUEST = 100
+        private const val TAG = "HudNavi"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        MapLibre.getInstance(this)
         setContentView(R.layout.activity_main)
 
-        hudView = findViewById(R.id.hudView)
+        mapView = findViewById(R.id.mapView)
+        mapView.onCreate(savedInstanceState)
+
         locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
 
         requestPermissions()
-
-        // 初始化路网缓存
-        RoadCache.init(this)
+        initMap()
     }
 
+    /**
+     * 构建程序化 HUD 矢量风格
+     * 使用 MapTiler 免费矢量瓦片（OpenMapTiles 格式）
+     * 无需 API key，无需外部 style.json
+     */
+    private fun buildHudStyle(): Style.Builder {
+        // OpenMapTiles 矢量瓦片源
+        // 免费方案：替换为你自己的 MapTiler key（https://cloud.maptiler.com 免费注册）
+        // 或使用任何 OpenMapTiles 兼容的矢量瓦片服务
+        val MAPTILER_KEY = "get_your_own_OpIi9IULFDHzALew38wE"
+        val tiles = VectorSource("openmaptiles",
+            "https://api.maptiler.com/tiles/v3-openmaptiles/tiles.json?key=$MAPTILER_KEY")
+
+        return Style.Builder()
+            .withSource(tiles)
+            // ── 水体 ──
+            .withLayer(FillLayer("water", "openmaptiles").apply {
+                sourceLayer = "water"
+                setProperties(PropertyFactory.fillColor("#0A1628"))
+            })
+            // ── 陆地覆被 ──
+            .withLayer(FillLayer("landuse", "openmaptiles").apply {
+                sourceLayer = "landuse"
+                setProperties(PropertyFactory.fillColor("#0D0D14"))
+            })
+            // ── 道路（由细到粗分层渲染） ──
+            // 小路与服务道路
+            .withLayer(LineLayer("road-minor", "openmaptiles").apply {
+                sourceLayer = "transportation"
+                filter = Expression.any(
+                    Expression.eq(Expression.get("class"), Expression.literal("service")),
+                    Expression.eq(Expression.get("class"), Expression.literal("path")),
+                    Expression.eq(Expression.get("class"), Expression.literal("track"))
+                )
+                setProperties(
+                    PropertyFactory.lineColor("#2A3540"),
+                    PropertyFactory.lineWidth(
+                        Expression.interpolate(Expression.linear(), Expression.zoom(),
+                            Expression.stop(13, 0.5f),
+                            Expression.stop(18, 3f)))
+                )
+            })
+            // 次要道路
+            .withLayer(LineLayer("road-secondary", "openmaptiles").apply {
+                sourceLayer = "transportation"
+                filter = Expression.any(
+                    Expression.eq(Expression.get("class"), Expression.literal("tertiary")),
+                    Expression.eq(Expression.get("class"), Expression.literal("secondary")),
+                    Expression.eq(Expression.get("class"), Expression.literal("minor"))
+                )
+                setProperties(
+                    PropertyFactory.lineColor("#667788"),
+                    PropertyFactory.lineWidth(
+                        Expression.interpolate(Expression.linear(), Expression.zoom(),
+                            Expression.stop(12, 0.8f),
+                            Expression.stop(18, 6f))),
+                    PropertyFactory.lineCap("round"),
+                    PropertyFactory.lineJoin("round")
+                )
+            })
+            // 主要道路（亮白，Hudway 风格的醒目道路）
+            .withLayer(LineLayer("road-primary", "openmaptiles").apply {
+                sourceLayer = "transportation"
+                filter = Expression.any(
+                    Expression.eq(Expression.get("class"), Expression.literal("primary")),
+                    Expression.eq(Expression.get("class"), Expression.literal("trunk"))
+                )
+                setProperties(
+                    PropertyFactory.lineColor("#CCDDEE"),
+                    PropertyFactory.lineWidth(
+                        Expression.interpolate(Expression.linear(), Expression.zoom(),
+                            Expression.stop(10, 1f),
+                            Expression.stop(18, 10f))),
+                    PropertyFactory.lineCap("round"),
+                    PropertyFactory.lineJoin("round")
+                )
+            })
+            // 高速公路（最亮，青色高亮）
+            .withLayer(LineLayer("road-motorway", "openmaptiles").apply {
+                sourceLayer = "transportation"
+                filter = Expression.eq(Expression.get("class"), Expression.literal("motorway"))
+                setProperties(
+                    PropertyFactory.lineColor("#44DDFF"),
+                    PropertyFactory.lineWidth(
+                        Expression.interpolate(Expression.linear(), Expression.zoom(),
+                            Expression.stop(8, 1.5f),
+                            Expression.stop(18, 14f))),
+                    PropertyFactory.lineCap("round"),
+                    PropertyFactory.lineJoin("round")
+                )
+            })
+            // ── 3D 建筑拉伸（Hudway 核心效果） ──
+            .withLayer(FillExtrusionLayer("hud-buildings", "openmaptiles").apply {
+                sourceLayer = "building"
+                setProperties(
+                    PropertyFactory.fillExtrusionColor("#556677"),
+                    PropertyFactory.fillExtrusionOpacity(0.9f),
+                    PropertyFactory.fillExtrusionBase(0f),
+                    PropertyFactory.fillExtrusionHeight(
+                        Expression.interpolate(Expression.linear(), Expression.zoom(),
+                            Expression.stop(15, 0f),
+                            Expression.stop(15.5, Expression.get("render_height"))))
+                )
+            })
+    }
+
+    private fun initMap() {
+        mapView.getMapAsync { map ->
+            mapboxMap = map
+            map.uiSettings.apply {
+                isLogoEnabled = false
+                isAttributionEnabled = false
+                isCompassEnabled = false
+            }
+
+            // 加载程序化 HUD 风格
+            map.setStyle(buildHudStyle()) { style ->
+                addVehicleMarker(style)
+                mapReady = true
+                Log.i(TAG, "HUD style loaded with ${style.layers.size} layers")
+            }
+        }
+    }
+
+    /**
+     * 添加车辆位置标记（GeoJSON 点 + 双层圆圈）
+     */
+    private fun addVehicleMarker(style: Style) {
+        val geoJson = createPointGeoJson(0.0, 0.0)
+        style.addSource(GeoJsonSource("vehicle", geoJson))
+
+        // 外圈发光（绿色光晕）
+        style.addLayer(CircleLayer("vehicle-glow", "vehicle").apply {
+            setProperties(
+                PropertyFactory.circleRadius(20f),
+                PropertyFactory.circleColor("#00FF88"),
+                PropertyFactory.circleOpacity(0.25f),
+                PropertyFactory.circleBlur(1f)
+            )
+        })
+
+        // 内圈实心（白色 + 绿色描边）
+        style.addLayer(CircleLayer("vehicle-dot", "vehicle").apply {
+            setProperties(
+                PropertyFactory.circleRadius(8f),
+                PropertyFactory.circleColor(Color.WHITE),
+                PropertyFactory.circleStrokeWidth(2.5f),
+                PropertyFactory.circleStrokeColor("#00FF88")
+            )
+        })
+    }
+
+    private fun createPointGeoJson(lat: Double, lng: Double): JsonObject {
+        return JsonObject().apply {
+            addProperty("type", "FeatureCollection")
+            add("features", JsonArray().apply {
+                add(JsonObject().apply {
+                    addProperty("type", "Feature")
+                    add("geometry", JsonObject().apply {
+                        addProperty("type", "Point")
+                        add("coordinates", JsonArray().apply { add(lng); add(lat) })
+                    })
+                    add("properties", JsonObject())
+                })
+            })
+        }
+    }
+
+    // === 权限 ===
     private fun requestPermissions() {
         val perms = arrayOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
@@ -119,238 +291,117 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     @SuppressLint("MissingPermission")
     private fun startLocationUpdates() {
         locationManager.getProvider(LocationManager.GPS_PROVIDER)?.let {
-            locationManager.requestLocationUpdates(
-                LocationManager.GPS_PROVIDER, 500L, 2f, this
-            )
+            locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 500L, 2f, this)
         }
         locationManager.getProvider(LocationManager.NETWORK_PROVIDER)?.let {
-            locationManager.requestLocationUpdates(
-                LocationManager.NETWORK_PROVIDER, 1000L, 5f, this
-            )
+            locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 1000L, 5f, this)
         }
-
-        // 磁力计
-        val mag = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
-        val acc = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-        if (mag != null && acc != null) {
-            sensorManager.registerListener(this, mag, SensorManager.SENSOR_DELAY_GAME)
-            sensorManager.registerListener(this, acc, SensorManager.SENSOR_DELAY_GAME)
+        sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)?.let {
+            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
+        }
+        sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let {
+            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
             hasCompass = true
         }
-
-        // 尝试最后已知位置
         locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER)?.let { onLocationChanged(it) }
             ?: locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)?.let { onLocationChanged(it) }
     }
 
+    // === GPS 回调 ===
     override fun onLocationChanged(location: Location) {
         val now = System.currentTimeMillis()
-        val lat = location.latitude
-        val lng = location.longitude
-
-        // 保存前一次作为插值起点
         if (currLat != 0.0) {
-            prevLat = currLat
-            prevLng = currLng
-            prevBearing = currBearing
-            prevSpeed = currSpeed
-            prevTime = currTime
+            prevLat = currLat; prevLng = currLng
+            prevBearing = currBearing; prevSpeed = currSpeed; prevTime = currTime
         }
-
-        // 更新最新一次
-        currLat = lat
-        currLng = lng
+        currLat = location.latitude
+        currLng = location.longitude
         currSpeed = location.speed * 3.6f
-
-        // 航向：GPS bearing 优先，磁力计备用
-        val rawBearing = if (location.hasBearing() && location.speed > 1f) {
-            location.bearing
-        } else if (hasCompass) {
-            compassBearing
-        } else {
-            0f
+        val rawBearing = when {
+            location.hasBearing() && location.speed > 1f -> location.bearing
+            hasCompass -> compassBearing
+            else -> 0f
         }
-
-        // 航向低通滤波（圆形平滑）
-        if (currLat == 0.0) {
-            currBearing = rawBearing
-        } else {
-            currBearing = circularLerp(currBearing, rawBearing, BEARING_SMOOTH_FACTOR)
-        }
-
+        currBearing = if (currLat == 0.0) rawBearing
+                      else circularLerp(currBearing, rawBearing, BEARING_SMOOTH)
         currTime = now
-
-        // 如果是首次定位，立即设置
         if (prevLat == 0.0) {
-            hudView.vehicleLat = lat
-            hudView.vehicleLng = lng
-            hudView.vehicleBearing = currBearing
-            hudView.vehicleSpeed = currSpeed
+            prevLat = currLat; prevLng = currLng
+            prevBearing = currBearing; prevSpeed = currSpeed; prevTime = currTime
         }
-
-        // 路网刷新
-        checkRoadRefresh(lat, lng)
     }
 
-    /**
-     * 插值更新（每帧调用）
-     * 在两次 GPS 更新之间平滑过渡位置和方向
-     */
+    // === 插值引擎（60fps 驱动 MapLibre 相机） ===
     private fun updateInterpolation() {
-        if (currLat == 0.0) return
-
-        val now = System.currentTimeMillis()
-        val elapsed = now - currTime
-
-        if (prevLat == 0.0 || elapsed >= INTERP_DURATION_MS) {
-            // 没有前一次数据，或已超过插值窗口，直接用最新值
-            hudView.vehicleLat = currLat
-            hudView.vehicleLng = currLng
-            hudView.vehicleBearing = currBearing
-            hudView.vehicleSpeed = currSpeed
+        if (currLat == 0.0 || !mapReady) return
+        val elapsed = System.currentTimeMillis() - currTime
+        val (iLat, iLng, iBearing) = if (prevLat == 0.0 || elapsed >= INTERP_MS) {
+            Triple(currLat, currLng, currBearing)
         } else {
-            // 在插值窗口内，做平滑过渡
-            val t = (elapsed.toFloat() / INTERP_DURATION_MS).coerceIn(0f, 1f)
-            // 使用 easeOut 曲线让过渡更自然（开始快、结束慢）
-            val easedT = 1f - (1f - t) * (1f - t)
+            val t = (elapsed.toFloat() / INTERP_MS).coerceIn(0f, 1f)
+            val et = 1f - (1f - t) * (1f - t)  // easeOut
+            Triple(
+                prevLat + (currLat - prevLat) * et,
+                prevLng + (currLng - prevLng) * et,
+                circularLerp(prevBearing, currBearing, et)
+            )
+        }
+        updateVehicleMarker(iLat, iLng)
+        mapboxMap?.cameraPosition = CameraPosition.Builder()
+            .target(LatLng(iLat, iLng))
+            .bearing(iBearing.toDouble())
+            .tilt(60.0)
+            .zoom(17.5)
+            .build()
+    }
 
-            // 位置线性插值
-            hudView.vehicleLat = prevLat + (currLat - prevLat) * easedT
-            hudView.vehicleLng = prevLng + (currLng - prevLng) * easedT
-
-            // 方向圆形插值
-            hudView.vehicleBearing = circularLerp(prevBearing, currBearing, easedT)
-
-            // 速度线性插值
-            hudView.vehicleSpeed = prevSpeed + (currSpeed - prevSpeed) * easedT
+    private fun updateVehicleMarker(lat: Double, lng: Double) {
+        mapboxMap?.getStyle { style ->
+            (style.getSource("vehicle") as? GeoJsonSource)?.setGeoJson(createPointGeoJson(lat, lng))
         }
     }
 
-    /**
-     * 圆形插值（角度专用）
-     * 处理 359°→1° 不走 180° 的问题
-     */
     private fun circularLerp(from: Float, to: Float, t: Float): Float {
-        var diff = ((to - from + 540f) % 360f) - 180f  // 归一化到 [-180, 180]
+        val diff = ((to - from + 540f) % 360f) - 180f
         return (from + diff * t + 360f) % 360f
     }
 
-    private fun checkRoadRefresh(lat: Double, lng: Double) {
-        if (isFetching) return
-        val dist = haversine(lastFetchLat, lastFetchLng, lat, lng)
-        if (dist > FETCH_DISTANCE_M || (lastFetchLat == 0.0 && lat != 0.0)) {
-            lastFetchLat = lat; lastFetchLng = lng
-
-            // 1. 先查缓存
-            val cached = RoadCache.get(lat, lng)
-            if (cached != null) {
-                hudView.roads = cached
-                hudView.statusText = "${RoadCache.stats()}"
-                hudView.invalidate()
-                Log.d("MainActivity", "路网缓存命中: ${cached.size} 段")
-
-                // 缓存命中但仍可在后台静默刷新（不阻塞渲染）
-                silentBackgroundRefresh(lat, lng)
-                return
-            }
-
-            // 2. 缓存未命中，走网络
-            isFetching = true
-            hudView.statusText = "加载路网..."
-            hudView.invalidate()
-
-            Thread {
-                val result = RoadFetcher.fetch(lat, lng)
-                handler.post {
-                    if (result.status == FetchStatus.SUCCESS) {
-                        // 写入缓存
-                        RoadCache.put(lat, lng, result.segments)
-                    }
-                    hudView.roads = result.segments
-                    hudView.statusText = when (result.status) {
-                        FetchStatus.SUCCESS -> "路网: ${result.segments.size} 段 (${RoadCache.stats()})"
-                        FetchStatus.EMPTY -> "该区域无道路"
-                        FetchStatus.ALL_FAILED -> "路网加载失败"
-                        else -> result.message
-                    }
-                    hudView.invalidate()
-                    isFetching = false
-                }
-            }.start()
-        }
-    }
-
-    /**
-     * 缓存命中后的后台静默刷新：不阻塞当前渲染，后台更新缓存
-     */
-    private fun silentBackgroundRefresh(lat: Double, lng: Double) {
-        Thread {
-            try {
-                val result = RoadFetcher.fetch(lat, lng)
-                if (result.status == FetchStatus.SUCCESS) {
-                    RoadCache.put(lat, lng, result.segments)
-                    handler.post {
-                        hudView.roads = result.segments
-                        hudView.statusText = "${RoadCache.stats()}"
-                        hudView.invalidate()
-                    }
-                }
-                // 定期清理过期缓存
-                RoadCache.cleanup()
-            } catch (e: Exception) {
-                Log.w("MainActivity", "静默刷新失败（不影响缓存）: ${e.message}")
-            }
-        }.start()
-    }
-
-    // === 磁力计 ===
+    // === 传感器 ===
     override fun onSensorChanged(event: SensorEvent) {
         when (event.sensor.type) {
-            Sensor.TYPE_ACCELEROMETER -> System.arraycopy(event.values, 0, accelerometer, 0, 3)
-            Sensor.TYPE_MAGNETIC_FIELD -> System.arraycopy(event.values, 0, magnetometer, 0, 3)
+            Sensor.TYPE_ACCELEROMETER -> System.arraycopy(event.values, 0, accData, 0, 3)
+            Sensor.TYPE_MAGNETIC_FIELD -> System.arraycopy(event.values, 0, magData, 0, 3)
         }
         val R = FloatArray(9); val I = FloatArray(9)
-        if (SensorManager.getRotationMatrix(R, I, accelerometer, magnetometer)) {
+        if (SensorManager.getRotationMatrix(R, I, accData, magData)) {
             val o = FloatArray(3); SensorManager.getOrientation(R, o)
             compassBearing = ((Math.toDegrees(o[0].toDouble()).toFloat() + 360f) % 360f)
         }
     }
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
-    private fun haversine(lat1: Double, lng1: Double, lat2: Double, lng2: Double): Double {
-        val R = 6371000.0
-        val dLat = Math.toRadians(lat2 - lat1); val dLng = Math.toRadians(lng2 - lng1)
-        val a = sin(dLat/2)*sin(dLat/2) + cos(Math.toRadians(lat1))*cos(Math.toRadians(lat2))*sin(dLng/2)*sin(dLng/2)
-        return R * 2 * atan2(sqrt(a), sqrt(1 - a))
-    }
-
+    // === 生命周期 ===
     private fun startRenderLoop() {
-        if (!renderRunning) {
-            renderRunning = true
-            handler.post(renderRunnable)
-        }
+        if (!renderRunning) { renderRunning = true; handler.post(renderRunnable) }
     }
-
     private fun stopRenderLoop() {
-        renderRunning = false
-        handler.removeCallbacks(renderRunnable)
+        renderRunning = false; handler.removeCallbacks(renderRunnable)
     }
 
-    override fun onResume() {
-        super.onResume()
-        startRenderLoop()
+    override fun onResume() { super.onResume(); mapView.onResume(); startRenderLoop() }
+    override fun onPause() { stopRenderLoop(); mapView.onPause(); super.onPause() }
+    override fun onStart() { super.onStart(); mapView.onStart() }
+    override fun onStop() { mapView.onStop(); super.onStop() }
+    override fun onLowMemory() { super.onLowMemory(); mapView.onLowMemory() }
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState); mapView.onSaveInstanceState(outState)
     }
-
-    override fun onPause() {
-        super.onPause()
-        stopRenderLoop()
-    }
-
     override fun onDestroy() {
-        super.onDestroy()
         stopRenderLoop()
         locationManager.removeUpdates(this)
         sensorManager.unregisterListener(this)
         handler.removeCallbacksAndMessages(null)
+        mapView.onDestroy()
+        super.onDestroy()
     }
 }

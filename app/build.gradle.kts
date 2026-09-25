@@ -11,8 +11,8 @@ android {
         applicationId = "com.hud.navi"
         minSdk = 21
         targetSdk = 34
-        versionCode = 54
-        versionName = "5.4"
+        versionCode = 60
+        versionName = "6.0"
     }
 
     buildTypes {
@@ -33,4 +33,5 @@ dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")
+    implementation("org.maplibre.gl:android-sdk:10.2.0")
 }
