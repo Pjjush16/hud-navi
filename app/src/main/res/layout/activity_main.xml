@@ -4,9 +4,102 @@
     android:layout_height="match_parent"
     android:background="#000000">
 
-    <org.maplibre.android.maps.MapView
-        android:id="@+id/mapView"
+    <!-- HUD 镜像翻转容器 -->
+    <FrameLayout
+        android:id="@+id/flipContainer"
         android:layout_width="match_parent"
-        android:layout_height="match_parent" />
+        android:layout_height="match_parent">
+
+        <org.maplibre.android.maps.MapView
+            android:id="@+id/mapView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+    </FrameLayout>
+
+    <!-- 状态文本（左上角） -->
+    <TextView
+        android:id="@+id/statusText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|start"
+        android:layout_marginStart="16dp"
+        android:layout_marginTop="12dp"
+        android:textColor="#88CCFF"
+        android:textSize="13sp"
+        android:shadowColor="#000000"
+        android:shadowDx="1"
+        android:shadowDy="1"
+        android:shadowRadius="3"
+        android:text="等待定位..." />
+
+    <!-- 速度显示（左下角） -->
+    <TextView
+        android:id="@+id/speedText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|start"
+        android:layout_marginStart="20dp"
+        android:layout_marginBottom="20dp"
+        android:textColor="#FFFFFF"
+        android:textSize="36sp"
+        android:textStyle="bold"
+        android:shadowColor="#000000"
+        android:shadowDx="2"
+        android:shadowDy="2"
+        android:shadowRadius="4"
+        android:text="0 km/h" />
+
+    <!-- HUD 镜像切换按钮（右上角） -->
+    <TextView
+        android:id="@+id/btnMirror"
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:layout_gravity="top|end"
+        android:layout_marginEnd="16dp"
+        android:layout_marginTop="12dp"
+        android:gravity="center"
+        android:text="🪞"
+        android:textSize="20sp"
+        android:background="@drawable/btn_bg"
+        android:alpha="0.6"
+        android:clickable="true"
+        android:focusable="true" />
+
+    <!-- 权限被拒提示（居中，默认隐藏） -->
+    <LinearLayout
+        android:id="@+id/permDeniedLayout"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:padding="32dp"
+        android:background="#CC000000"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="需要定位权限才能使用导航"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:layout_marginBottom="16dp" />
+
+        <TextView
+            android:id="@+id/btnRetryPerm"
+            android:layout_width="wrap_content"
+            android:layout_height="44dp"
+            android:gravity="center"
+            android:paddingStart="24dp"
+            android:paddingEnd="24dp"
+            android:text="重新授权"
+            android:textColor="#FFFFFF"
+            android:textSize="15sp"
+            android:background="@drawable/btn_bg"
+            android:clickable="true"
+            android:focusable="true" />
+
+    </LinearLayout>
 
 </FrameLayout>

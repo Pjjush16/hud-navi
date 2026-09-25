@@ -2,6 +2,7 @@ package com.hud.navi
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.hardware.Sensor
@@ -11,14 +12,18 @@ import android.hardware.SensorManager
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.View
+import android.view.WindowManager
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
-import com.google.gson.JsonArray
-import com.google.gson.JsonObject
 import com.mapbox.mapboxsdk.Mapbox
 import com.mapbox.mapboxsdk.camera.CameraPosition
 import com.mapbox.mapboxsdk.geometry.LatLng
@@ -31,19 +36,20 @@ import com.mapbox.mapboxsdk.style.layers.FillLayer
 import com.mapbox.mapboxsdk.style.layers.LineLayer
 import com.mapbox.mapboxsdk.style.layers.PropertyFactory
 import com.mapbox.mapboxsdk.style.sources.GeoJsonSource
-import com.mapbox.mapboxsdk.style.sources.RasterSource
 import com.mapbox.mapboxsdk.style.sources.VectorSource
+import com.google.gson.JsonArray
+import com.google.gson.JsonObject
 import kotlin.math.*
 
 /**
- * HUD 导航 v6.0 — MapLibre GL Native 渲染引擎
+ * HUD 导航 v6.1 — P0 修复版
  *
- * 核心变化（相对 v5.x Canvas 方案）：
- * - 替换自研 Canvas 45° 透视为 MapLibre 原生 3D 相机（pitch=60° + bearing）
- * - 矢量瓦片（OpenMapTiles）替代 Overpass API + 手动路网查询
- * - fill-extrusion 3D 建筑拉伸，实现 Hudway 风格立体街区
- * - 程序化构建 HUD 暗色风格：深黑底 + 白路网 + 灰蓝 3D 建筑
- * - 保留 GPS/磁力计插值引擎，驱动 MapLibre 相机平滑运动
+ * P0 修复清单:
+ * 1. HUD 镜像（垂直翻转）开关 — 挡风玻璃投影必须
+ * 2. 屏幕常亮 + 前台服务 — 防止熄屏/后台回收
+ * 3. 权限被拒 UI 提示与重试
+ * 4. 后方路段投影错乱 — MapLibre 3D 相机已自然解决（v6.0 迁移收益）
+ * 5. 状态文本真正上屏 — 网络/GPS/定位状态实时可见
  */
 class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener {
 
@@ -52,8 +58,17 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private lateinit var sensorManager: SensorManager
     private val handler = Handler(Looper.getMainLooper())
 
+    // === UI 组件 ===
+    private lateinit var flipContainer: FrameLayout
+    private lateinit var statusText: TextView
+    private lateinit var speedText: TextView
+    private lateinit var btnMirror: TextView
+    private lateinit var permDeniedLayout: LinearLayout
+    private lateinit var btnRetryPerm: TextView
+
     private var mapboxMap: com.mapbox.mapboxsdk.maps.MapboxMap? = null
     private var mapReady = false
+    private var mirrorEnabled = false
 
     // === 插值引擎 ===
     private var prevLat = 0.0; private var prevLng = 0.0
@@ -63,6 +78,11 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private val INTERP_MS = 800L
     private val BEARING_SMOOTH = 0.15f
     private val FRAME_MS = 16L
+
+    // === 状态追踪 ===
+    private var gpsFixCount = 0
+    private var lastGpsTime = 0L
+    private var networkAvailable = true
 
     private var renderRunning = false
     private val renderRunnable = object : Runnable {
@@ -85,8 +105,20 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // P0-2: 屏幕常亮
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
         Mapbox.getInstance(this)
         setContentView(R.layout.activity_main)
+
+        // 绑定 UI 组件
+        flipContainer = findViewById(R.id.flipContainer)
+        statusText = findViewById(R.id.statusText)
+        speedText = findViewById(R.id.speedText)
+        btnMirror = findViewById(R.id.btnMirror)
+        permDeniedLayout = findViewById(R.id.permDeniedLayout)
+        btnRetryPerm = findViewById(R.id.btnRetryPerm)
 
         mapView = findViewById(R.id.mapView)
         mapView.onCreate(savedInstanceState)
@@ -94,8 +126,87 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
 
+        // P0-1: HUD 镜像切换按钮
+        btnMirror.setOnClickListener { toggleMirror() }
+
+        // P0-3: 权限重试按钮
+        btnRetryPerm.setOnClickListener {
+            permDeniedLayout.visibility = View.GONE
+            requestPermissions()
+        }
+
+        // P0-2: 启动前台服务
+        startHudForegroundService()
+
         requestPermissions()
         initMap()
+    }
+
+    /**
+     * P0-1: HUD 镜像翻转（垂直翻转整个地图容器）
+     * 挡风玻璃投影时反射画面为反字，必须垂直翻转
+     */
+    private fun toggleMirror() {
+        mirrorEnabled = !mirrorEnabled
+        flipContainer.scaleY = if (mirrorEnabled) -1f else 1f
+        // 状态文本不受镜像影响（它在 flipContainer 外面）
+        btnMirror.alpha = if (mirrorEnabled) 1.0f else 0.6f
+        updateStatusText()
+    }
+
+    /**
+     * P0-2: 启动前台服务（防止系统回收）
+     */
+    private fun startHudForegroundService() {
+        val serviceIntent = Intent(this, HudForegroundService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(serviceIntent)
+        } else {
+            startService(serviceIntent)
+        }
+    }
+
+    /**
+     * P0-5: 状态文本实时更新
+     */
+    private fun updateStatusText() {
+        val gpsAge = if (lastGpsTime > 0) (System.currentTimeMillis() - lastGpsTime) / 1000 else -1L
+        val statusParts = mutableListOf<String>()
+
+        when {
+            currLat == 0.0 -> statusParts.add("等待GPS定位...")
+            gpsAge > 10 -> statusParts.add("GPS信号丢失 (${gpsAge}s)")
+            gpsAge > 5 -> statusParts.add("GPS信号弱 (${gpsAge}s)")
+            else -> statusParts.add("GPS正常 (${gpsFixCount}次)")
+        }
+
+        statusParts.add("速度: ${currSpeed.toInt()} km/h")
+        if (mirrorEnabled) statusParts.add("镜像模式")
+
+        val bearing = if (hasCompass) compassBearing.toInt() else currBearing.toInt()
+        statusParts.add("航向: ${bearing}°")
+
+        statusText.text = statusParts.joinToString(" | ")
+    }
+
+    private fun initMap() {
+        mapView.getMapAsync { map ->
+            mapboxMap = map
+            map.uiSettings.apply {
+                isLogoEnabled = false
+                isAttributionEnabled = false
+                isCompassEnabled = false
+            }
+
+            updateStatusText()
+
+            map.setStyle(buildHudStyle()) { style ->
+                addVehicleMarker(style)
+                mapReady = true
+                Log.i(TAG, "HUD style loaded with ${style.layers.size} layers")
+                updateStatusText()
+            }
+        }
     }
 
     /**
@@ -184,24 +295,6 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                             Expression.stop(15.5, Expression.get("render_height"))))))
     }
 
-    private fun initMap() {
-        mapView.getMapAsync { map ->
-            mapboxMap = map
-            map.uiSettings.apply {
-                isLogoEnabled = false
-                isAttributionEnabled = false
-                isCompassEnabled = false
-            }
-
-            // 加载程序化 HUD 风格
-            map.setStyle(buildHudStyle()) { style ->
-                addVehicleMarker(style)
-                mapReady = true
-                Log.i(TAG, "HUD style loaded with ${style.layers.size} layers")
-            }
-        }
-    }
-
     /**
      * 添加车辆位置标记（GeoJSON 点 + 双层圆圈）
      */
@@ -246,7 +339,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         }
     }
 
-    // === 权限 ===
+    // === P0-3: 权限管理（含拒绝提示） ===
     private fun requestPermissions() {
         val perms = arrayOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
@@ -263,9 +356,16 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         requestCode: Int, permissions: Array<out String>, grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == PERM_REQUEST && grantResults.isNotEmpty()
-            && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            startLocationUpdates()
+        if (requestCode == PERM_REQUEST) {
+            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                permDeniedLayout.visibility = View.GONE
+                startLocationUpdates()
+            } else {
+                // P0-3: 权限被拒时显示提示和重试按钮
+                permDeniedLayout.visibility = View.VISIBLE
+                statusText.text = "需要定位权限才能使用 HUD 导航"
+                Log.w(TAG, "Location permission denied")
+            }
         }
     }
 
@@ -291,6 +391,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     // === GPS 回调 ===
     override fun onLocationChanged(location: Location) {
         val now = System.currentTimeMillis()
+        gpsFixCount++
+        lastGpsTime = now
+
         if (currLat != 0.0) {
             prevLat = currLat; prevLng = currLng
             prevBearing = currBearing; prevSpeed = currSpeed; prevTime = currTime
@@ -310,6 +413,10 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             prevLat = currLat; prevLng = currLng
             prevBearing = currBearing; prevSpeed = currSpeed; prevTime = currTime
         }
+
+        // P0-5: 更新状态文本和速度显示
+        updateStatusText()
+        speedText.text = "${currSpeed.toInt()} km/h"
     }
 
     // === 插值引擎（60fps 驱动 MapLibre 相机） ===
@@ -334,6 +441,11 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             .tilt(60.0)
             .zoom(17.5)
             .build()
+
+        // P0-5: 每秒更新一次状态文本（非GPS触发的定时刷新）
+        if (System.currentTimeMillis() - lastGpsTime > 3000 && gpsFixCount > 0) {
+            updateStatusText()
+        }
     }
 
     private fun updateVehicleMarker(lat: Double, lng: Double) {
@@ -369,19 +481,35 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         renderRunning = false; handler.removeCallbacks(renderRunnable)
     }
 
-    override fun onResume() { super.onResume(); mapView.onResume(); startRenderLoop() }
-    override fun onPause() { stopRenderLoop(); mapView.onPause(); super.onPause() }
+    override fun onResume() {
+        super.onResume()
+        mapView.onResume()
+        startRenderLoop()
+        // P0-2: 确保前台服务运行中
+        startHudForegroundService()
+    }
+
+    override fun onPause() {
+        // P0-2: onPause 不停止前台服务和 GPS（后台保持定位）
+        stopRenderLoop()
+        mapView.onPause()
+        super.onPause()
+    }
+
     override fun onStart() { super.onStart(); mapView.onStart() }
     override fun onStop() { mapView.onStop(); super.onStop() }
     override fun onLowMemory() { super.onLowMemory(); mapView.onLowMemory() }
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState); mapView.onSaveInstanceState(outState)
     }
+
     override fun onDestroy() {
         stopRenderLoop()
         locationManager.removeUpdates(this)
         sensorManager.unregisterListener(this)
         handler.removeCallbacksAndMessages(null)
+        // P0-2: 停止前台服务
+        stopService(Intent(this, HudForegroundService::class.java))
         mapView.onDestroy()
         super.onDestroy()
     }
