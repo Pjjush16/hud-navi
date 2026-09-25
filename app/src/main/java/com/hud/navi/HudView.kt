@@ -163,9 +163,9 @@ class HudView @JvmOverloads constructor(
         val dynamicZoom = getDynamicZoom(vehicleSpeed)
         val zoomFactor = 2f.pow(dynamicZoom - 15)
 
-        // 高架抬升偏移量（像素）— 物理上移，看起来在高处
-        val elevatedOffsetX = 18f
-        val elevatedOffsetY = -22f
+        // 每层偏移量（像素）— 重庆式多层立交按 layer 值倍乘
+        val layerOffsetX = 14f   // 每层水平偏移
+        val layerOffsetY = -18f  // 每层垂直偏移（负=上方）
 
         // 高架阴影画笔（画在地面位置，表示高架的投影）
         val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -199,8 +199,8 @@ class HudView @JvmOverloads constructor(
             }
 
             if (segment.tunnel) {
-                paint.pathEffect = dashPathEffect
-                paint.alpha = 100
+                // 隧道：第一遍跳过，第三遍单独处理
+                continue
             }
 
             roadPath.reset()
@@ -211,26 +211,53 @@ class HudView @JvmOverloads constructor(
                 else roadPath.lineTo(px, py)
             }
             canvas.drawPath(roadPath, paint)
-
-            paint.pathEffect = null
-            paint.alpha = 255
         }
 
-        // === 第二遍：画高架道路（物理抬升，偏移绘制） ===
-        for (segment in roadSegments) {
-            if (!segment.elevated) continue
+        // === 第二遍：画高架道路（按 layer 值物理抬升） ===
+        // 先按 layer 排序，从低层到高层画，高层覆盖低层
+        val elevatedSegments = roadSegments.filter { it.elevated }.sortedBy { it.layer }
+        for (segment in elevatedSegments) {
             val paint = roadPaints[segment.type] ?: continue
             paint.strokeWidth = segment.type.widthBase * zoomFactor * 0.7f * 1.15f  // 高架稍粗
 
-            // 用偏移量画高架实线（物理位置抬高）
+            // 按 layer 值倍乘偏移（重庆多层立交：layer=1,2,3 各偏移一层）
+            val offsetX = layerOffsetX * segment.layer
+            val offsetY = layerOffsetY * segment.layer
+
             roadPath.reset()
             var first = true
             for ((lat, lng) in segment.points) {
                 val (px, py) = latLngToPixel(lat, lng, drawLat, drawLng, metersPerPixel)
-                if (first) { roadPath.moveTo(px + elevatedOffsetX, py + elevatedOffsetY); first = false }
-                else roadPath.lineTo(px + elevatedOffsetX, py + elevatedOffsetY)
+                if (first) { roadPath.moveTo(px + offsetX, py + offsetY); first = false }
+                else roadPath.lineTo(px + offsetX, py + offsetY)
             }
             canvas.drawPath(roadPath, paint)
+        }
+
+        // === 第三遍：画隧道/地下道路（按 layer 值物理下沉） ===
+        val tunnelSegments = roadSegments.filter { it.tunnel }
+        for (segment in tunnelSegments) {
+            val paint = roadPaints[segment.type] ?: continue
+            paint.strokeWidth = segment.type.widthBase * zoomFactor * 0.7f
+
+            // 隧道按 layer 负值偏移（layer=-1 → 下沉一层，-2 → 下沉两层）
+            val offsetX = layerOffsetX * segment.layer  // layer 为负，所以方向相反
+            val offsetY = layerOffsetY * segment.layer
+
+            paint.pathEffect = dashPathEffect
+            paint.alpha = 100
+
+            roadPath.reset()
+            var first = true
+            for ((lat, lng) in segment.points) {
+                val (px, py) = latLngToPixel(lat, lng, drawLat, drawLng, metersPerPixel)
+                if (first) { roadPath.moveTo(px + offsetX, py + offsetY); first = false }
+                else roadPath.lineTo(px + offsetX, py + offsetY)
+            }
+            canvas.drawPath(roadPath, paint)
+
+            paint.pathEffect = null
+            paint.alpha = 255
         }
 
         canvas.restore()
@@ -301,7 +328,9 @@ class HudView @JvmOverloads constructor(
         // 道路层级指示器（右上角，仅非地面时显示）
         if (roadLayer != 0) {
             val (label, color) = when {
-                roadLayer > 0 -> "↑ 高架" to Color.parseColor("#FF8844")
+                roadLayer > 1 -> "↑ 高架 L$roadLayer" to Color.parseColor("#FF8844")
+                roadLayer == 1 -> "↑ 高架" to Color.parseColor("#FF8844")
+                roadLayer < -1 -> "↓ 隧道 L$roadLayer" to Color.parseColor("#4488FF")
                 else -> "↓ 隧道" to Color.parseColor("#4488FF")
             }
             val layerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {

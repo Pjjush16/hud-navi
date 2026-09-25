@@ -167,8 +167,20 @@ object RoadFetcher {
             val layerStr = tags.optString("layer", "0")
             val layer = layerStr.toIntOrNull() ?: 0
 
-            val isElevated = bridge.isNotEmpty() && bridge != "no" || layer > 0
-            val isTunnel = tunnel.isNotEmpty() && tunnel != "no" || layer < 0
+            val hasBridge = bridge.isNotEmpty() && bridge != "no"
+            val hasTunnel = tunnel.isNotEmpty() && tunnel != "no"
+            val isElevated = hasBridge || layer > 0
+            val isTunnel = hasTunnel || layer < 0
+
+            // 重庆式多层立交：bridge=yes 但没标 layer → 默认 layer=1
+            // layer=2, 3, 4 → 多层高架，渲染时按层偏移
+            val effectiveLayer = when {
+                isElevated && layer <= 0 -> 1   // bridge=yes 但无 layer 标签 → 第一层
+                isElevated -> layer              // 有明确 layer 值
+                isTunnel && layer >= 0 -> -1     // tunnel=yes 但无 layer → 地下一层
+                isTunnel -> layer                // 有明确负 layer 值
+                else -> 0                        // 地面
+            }
 
             if (isElevated) elevatedCount++
             if (isTunnel) tunnelCount++
@@ -181,7 +193,7 @@ object RoadFetcher {
             }
 
             if (points.size >= 2) {
-                segments.add(RoadSegment(roadType, points, isElevated, isTunnel, layer))
+                segments.add(RoadSegment(roadType, points, isElevated, isTunnel, effectiveLayer))
             }
         }
 

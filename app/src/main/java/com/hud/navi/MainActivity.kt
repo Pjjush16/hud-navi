@@ -915,39 +915,47 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private fun updateRoadLayer() {
         if (!hudView.hasRoads) return
 
-        // 检查附近是否有高架/隧道路段（100m 范围内）
-        var hasNearbyElevated = false
-        var hasNearbyTunnel = false
+        // 收集附近（100m）所有高架/隧道路段的 layer 值
+        var maxElevatedLayer = 0    // 附近最高的高架层数
+        var minTunnelLayer = 0      // 附近最深的隧道层数
 
         for (seg in hudView.roadSegments) {
             if (!seg.elevated && !seg.tunnel) continue
-            // 检查路段是否在当前车辆位置附近
             for ((lat, lng) in seg.points) {
                 val dist = RoadFetcher.haversine(vehicleLat, vehicleLng, lat, lng)
                 if (dist < 100.0) {
-                    if (seg.elevated) hasNearbyElevated = true
-                    if (seg.tunnel) hasNearbyTunnel = true
+                    if (seg.elevated && seg.layer > maxElevatedLayer) {
+                        maxElevatedLayer = seg.layer
+                    }
+                    if (seg.tunnel && seg.layer < minTunnelLayer) {
+                        minTunnelLayer = seg.layer
+                    }
                     break
                 }
             }
-            if (hasNearbyElevated && hasNearbyTunnel) break
         }
 
-        val newLayer = when {
-            // 上升 >5m 且附近有高架 → 判定为高架
-            smoothAltitudeDelta > 5f && hasNearbyElevated -> 1
-            // 下降 >3m 且附近有隧道 → 判定为隧道
-            smoothAltitudeDelta < -3f && hasNearbyTunnel -> -1
-            // 高度变化回到 ±3m 内 → 地面
-            smoothAltitudeDelta in -3f..3f -> 0
-            // 其他情况保持当前层级（滞后效应，避免频繁切换）
-            else -> currentLayer
+        // 每层高度约 5m，用气压变化估算当前在第几层
+        val altitudePerLayer = 5.0  // 每层约 5m
+        val estimatedLayer = when {
+            smoothAltitudeDelta > 3f && maxElevatedLayer > 0 -> {
+                // 上升了 → 估算层数，但不超过附近最高层
+                val layer = (smoothAltitudeDelta / altitudePerLayer).toInt().coerceIn(1, maxElevatedLayer)
+                layer
+            }
+            smoothAltitudeDelta < -3f && minTunnelLayer < 0 -> {
+                // 下降了 → 估算层数（负值）
+                val layer = (smoothAltitudeDelta / altitudePerLayer).toInt().coerceIn(minTunnelLayer, -1)
+                layer
+            }
+            smoothAltitudeDelta in -3f..3f -> 0  // ±3m 内 → 地面
+            else -> currentLayer  // 高度变化不够大 → 保持
         }
 
-        if (newLayer != currentLayer) {
-            Log.i(TAG, "Layer change: $currentLayer → $newLayer (Δalt=${String.format("%.1f", smoothAltitudeDelta)}m, nearbyElev=$hasNearbyElevated, nearbyTunnel=$hasNearbyTunnel)")
-            currentLayer = newLayer
-            hudView.roadLayer = newLayer
+        if (estimatedLayer != currentLayer) {
+            Log.i(TAG, "Layer change: $currentLayer → $estimatedLayer (Δalt=${String.format("%.1f", smoothAltitudeDelta)}m, maxElev=$maxElevatedLayer, minTunnel=$minTunnelLayer)")
+            currentLayer = estimatedLayer
+            hudView.roadLayer = estimatedLayer
         }
     }
 
