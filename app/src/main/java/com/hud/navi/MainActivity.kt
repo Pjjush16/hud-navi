@@ -51,16 +51,15 @@ import kotlinx.coroutines.launch
 import kotlin.math.*
 
 /**
- * HUD 导航 v10.3 — 气压计高架/隧道层级识别
+ * HUD 导航 v10.6 — 纯平面 HUD，去掉所有物理偏移和阴影
  *
- * v10.2 → v10.3:
- * - Overpass API 查询新增 bridge/tunnel/layer 标签解析
- * - 气压计相对高度变化 + OSM 路网标签 → 判断当前在高架还是地面
- * - 高架路段：加粗渲染 + 偏移阴影（视觉区分层级）
- * - 隧道路段：虚线 + 降低透明度
- * - HUD 右上角：↑高架（橙）/ ↓隧道（蓝）/ 无=地面
- * - 海拔数字已隐去（不显示绝对海拔，只显示层级状态）
- * - 层级判断带滞后（±3m 死区），避免频繁切换
+ * v10.5 → v10.6:
+ * - 去掉高架阴影绘制
+ * - 去掉按 layer 值的像素偏移
+ * - 所有道路统一在同一平面绘制（真实坐标）
+ * - 仅靠线条样式区分：地面=正常实线，高架=加粗实线(×1.3)，隧道=虚线半透明
+ * - 右上角层级指示器保留（↑ 高架 L2 / ↓ 隧道），气压计+OSM 判定逻辑保留
+ * - 二维 HUD 不需要拟真分层，保持画面干净
  */
 class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener {
 

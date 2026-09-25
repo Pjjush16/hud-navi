@@ -163,44 +163,26 @@ class HudView @JvmOverloads constructor(
         val dynamicZoom = getDynamicZoom(vehicleSpeed)
         val zoomFactor = 2f.pow(dynamicZoom - 15)
 
-        // 每层偏移量（像素）— 重庆式多层立交按 layer 值倍乘
-        val layerOffsetX = 14f   // 每层水平偏移
-        val layerOffsetY = -18f  // 每层垂直偏移（负=上方）
-
-        // 高架阴影画笔（画在地面位置，表示高架的投影）
-        val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0x22FFFFFF.toInt()
-            style = Paint.Style.STROKE
-            strokeCap = Paint.Cap.ROUND
-            strokeJoin = Paint.Join.ROUND
-        }
-
         // 虚线效果（用于隧道/地下路段）
         val dashPathEffect = DashPathEffect(floatArrayOf(8f, 6f), 0f)
 
-        // === 第一遍：画所有地面道路 + 高架的地面阴影 + 隧道 ===
+        // 纯平面绘制：所有道路在同一平面上，仅靠线条样式区分
+        // 地面 = 正常实线
+        // 高架 = 加粗实线（×1.3）
+        // 隧道 = 虚线 + 半透明
         for (segment in roadSegments) {
             val paint = roadPaints[segment.type] ?: continue
             paint.strokeWidth = segment.type.widthBase * zoomFactor * 0.7f
 
             if (segment.elevated) {
-                // 高架：先在地面位置画阴影（半透明细线）
-                shadowPaint.strokeWidth = paint.strokeWidth * 0.6f
-                roadPath.reset()
-                var first = true
-                for ((lat, lng) in segment.points) {
-                    val (px, py) = latLngToPixel(lat, lng, drawLat, drawLng, metersPerPixel)
-                    if (first) { roadPath.moveTo(px, py); first = false }
-                    else roadPath.lineTo(px, py)
-                }
-                canvas.drawPath(roadPath, shadowPaint)
-                // 不在这一遍画实线
-                continue
+                // 高架：加粗，不偏移
+                paint.strokeWidth *= 1.3f
             }
 
             if (segment.tunnel) {
-                // 隧道：第一遍跳过，第三遍单独处理
-                continue
+                // 隧道：虚线 + 降低透明度
+                paint.pathEffect = dashPathEffect
+                paint.alpha = 100
             }
 
             roadPath.reset()
@@ -211,51 +193,8 @@ class HudView @JvmOverloads constructor(
                 else roadPath.lineTo(px, py)
             }
             canvas.drawPath(roadPath, paint)
-        }
 
-        // === 第二遍：画高架道路（按 layer 值物理抬升） ===
-        // 先按 layer 排序，从低层到高层画，高层覆盖低层
-        val elevatedSegments = roadSegments.filter { it.elevated }.sortedBy { it.layer }
-        for (segment in elevatedSegments) {
-            val paint = roadPaints[segment.type] ?: continue
-            paint.strokeWidth = segment.type.widthBase * zoomFactor * 0.7f * 1.15f  // 高架稍粗
-
-            // 按 layer 值倍乘偏移（重庆多层立交：layer=1,2,3 各偏移一层）
-            val offsetX = layerOffsetX * segment.layer
-            val offsetY = layerOffsetY * segment.layer
-
-            roadPath.reset()
-            var first = true
-            for ((lat, lng) in segment.points) {
-                val (px, py) = latLngToPixel(lat, lng, drawLat, drawLng, metersPerPixel)
-                if (first) { roadPath.moveTo(px + offsetX, py + offsetY); first = false }
-                else roadPath.lineTo(px + offsetX, py + offsetY)
-            }
-            canvas.drawPath(roadPath, paint)
-        }
-
-        // === 第三遍：画隧道/地下道路（按 layer 值物理下沉） ===
-        val tunnelSegments = roadSegments.filter { it.tunnel }
-        for (segment in tunnelSegments) {
-            val paint = roadPaints[segment.type] ?: continue
-            paint.strokeWidth = segment.type.widthBase * zoomFactor * 0.7f
-
-            // 隧道按 layer 负值偏移（layer=-1 → 下沉一层，-2 → 下沉两层）
-            val offsetX = layerOffsetX * segment.layer  // layer 为负，所以方向相反
-            val offsetY = layerOffsetY * segment.layer
-
-            paint.pathEffect = dashPathEffect
-            paint.alpha = 100
-
-            roadPath.reset()
-            var first = true
-            for ((lat, lng) in segment.points) {
-                val (px, py) = latLngToPixel(lat, lng, drawLat, drawLng, metersPerPixel)
-                if (first) { roadPath.moveTo(px + offsetX, py + offsetY); first = false }
-                else roadPath.lineTo(px + offsetX, py + offsetY)
-            }
-            canvas.drawPath(roadPath, paint)
-
+            // 恢复画笔状态
             paint.pathEffect = null
             paint.alpha = 255
         }
