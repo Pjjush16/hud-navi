@@ -25,11 +25,11 @@ import android.view.View
 import kotlin.math.*
 
 /**
- * hud-navi v9.3 — 镜像阴影修复 + 阴影加宽
+ * hud-navi v9.4 — 镜像阴影修复 + 阴影微调
  *
- * v9.3 变更：
+ * v9.4 变更：
  * - 修复镜像模式下顶部阴影（渐变遮罩）方向未跟随翻转
- * - 渐变区域从 28% 加宽到 40%，阴影更明显
+ * - 渐变区域从 28% 微调到 35%，阴影稍宽但不过度遮挡内容
  */
 class HudView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
@@ -159,8 +159,7 @@ class HudView @JvmOverloads constructor(
 
         // 顶部渐变遮罩：路网向上逐渐淡出为纯黑
         // 镜像时画布翻转，渐变方向需反转（TRANSPARENT→BLACK 使视觉顶部为黑色）
-        // 加宽渐变区域使阴影更明显
-        val fadeHeight = h * 0.40f
+        val fadeHeight = h * 0.35f
         val fadeShader = if (mirrorEnabled) {
             LinearGradient(0f, h, 0f, h - fadeHeight,
                 Color.TRANSPARENT, Color.BLACK, Shader.TileMode.CLAMP)
