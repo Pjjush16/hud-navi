@@ -25,11 +25,11 @@ import android.view.View
 import kotlin.math.*
 
 /**
- * hud-navi v9.4 — 镜像阴影修复 + 阴影微调
+ * hud-navi v9.5 — 镜像阴影 CLAMP 方向修复
  *
- * v9.4 变更：
- * - 修复镜像模式下顶部阴影（渐变遮罩）方向未跟随翻转
- * - 渐变区域从 28% 微调到 35%，阴影稍宽但不过度遮挡内容
+ * v9.5 变更：
+ * - 修复镜像模式下渐变 CLAMP 延伸方向错误（原来整块视觉底部都是纯黑）
+ * - 正确方向：canvas y < h-fadeHeight → 透明，速度计区域不再被黑覆盖
  */
 class HudView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
@@ -158,11 +158,14 @@ class HudView @JvmOverloads constructor(
         drawVehicleMarker(canvas, w, h)
 
         // 顶部渐变遮罩：路网向上逐渐淡出为纯黑
-        // 镜像时画布翻转，渐变方向需反转（TRANSPARENT→BLACK 使视觉顶部为黑色）
-        val fadeHeight = h * 0.35f
+        // 镜像时画布翻转，渐变端点需反转：
+        //   视觉顶部(canvas底部) = 黑色(路网淡出)
+        //   视觉底部(canvas顶部) = 透明(速度计区域干净)
+        //   CLAMP 延伸方向：canvas y < h-fadeHeight → 透明 ✓
+        val fadeHeight = h * 0.28f
         val fadeShader = if (mirrorEnabled) {
-            LinearGradient(0f, h, 0f, h - fadeHeight,
-                Color.TRANSPARENT, Color.BLACK, Shader.TileMode.CLAMP)
+            LinearGradient(0f, h - fadeHeight, 0f, h,
+                Color.BLACK, Color.TRANSPARENT, Shader.TileMode.CLAMP)
         } else {
             LinearGradient(0f, 0f, 0f, fadeHeight,
                 Color.BLACK, Color.TRANSPARENT, Shader.TileMode.CLAMP)
