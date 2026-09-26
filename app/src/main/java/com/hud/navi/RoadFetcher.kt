@@ -16,7 +16,6 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-
 package com.hud.navi
 
 import android.util.Log
@@ -24,6 +23,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.BufferedReader
+import java.io.File
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
@@ -32,14 +32,14 @@ import kotlin.math.*
 
 /**
  * Overpass API 路网数据获取器
- * 查询当前位置周围的道路网络，按道路类型分层返回
+ * v2 — 增加磁盘缓存，启动时秒加载上次数据
  */
 object RoadFetcher {
 
     private const val TAG = "RoadFetcher"
     private const val OVERPASS_URL = "https://overpass-api.de/api/interpreter"
-    private const val RADIUS = 1200 // 查询半径（米）
-    private const val MIN_INTERVAL_MS = 3000 // 最小请求间隔
+    private const val RADIUS = 1200
+    private const val MIN_INTERVAL_MS = 3000
 
     private var lastFetchTime = 0L
     private var lastLat = 0.0
@@ -48,20 +48,14 @@ object RoadFetcher {
     private var cacheCenterLat = 0.0
     private var cacheCenterLng = 0.0
 
-    /**
-     * 道路分段数据
-     * @param type 道路类型
-     * @param points 经纬度坐标列表 [(lat,lng), ...]
-     * @param elevated 是否高架/桥梁 (bridge=yes 或 layer>0)
-     * @param tunnel 是否隧道
-     * @param layer OSM layer 值（默认 0，正值=上层，负值=下层）
-     */
+    // === 磁盘缓存 ===
+    private var cacheDir: File? = null
+    private const val CACHE_FILE = "road_cache.json"
+    private const val CACHE_MAX_AGE_MS = 30 * 60 * 1000L  // 30 分钟
+
     data class RoadSegment(
         val type: RoadType,
-        val points: List<Pair<Double, Double>>,
-        val elevated: Boolean = false,
-        val tunnel: Boolean = false,
-        val layer: Int = 0
+        val points: List<Pair<Double, Double>>
     )
 
     enum class RoadType(val priority: Int, val color: Int, val widthBase: Float) {
@@ -89,14 +83,111 @@ object RoadFetcher {
     }
 
     /**
-     * 获取路网数据（带缓存）
-     * 当距离上次获取位置超过 200m 或超过 10s 才真正请求
+     * 初始化磁盘缓存目录
+     */
+    fun initCache(dir: File) {
+        cacheDir = dir
+        if (!dir.exists()) dir.mkdirs()
+    }
+
+    /**
+     * 从磁盘加载缓存（启动时调用，秒加载）
+     */
+    fun loadDiskCache(): List<RoadSegment> {
+        val dir = cacheDir ?: return emptyList()
+        val file = File(dir, CACHE_FILE)
+        if (!file.exists()) return emptyList()
+
+        val age = System.currentTimeMillis() - file.lastModified()
+        if (age > CACHE_MAX_AGE_MS) {
+            Log.i(TAG, "Disk cache expired (${age / 1000}s old)")
+            return emptyList()
+        }
+
+        return try {
+            val json = file.readText()
+            val segments = deserializeSegments(json)
+            Log.i(TAG, "Loaded ${segments.size} segments from disk cache (${age / 1000}s old)")
+            segments
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to load disk cache: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /**
+     * 保存缓存到磁盘
+     */
+    private fun saveDiskCache(segments: List<RoadSegment>, lat: Double, lng: Double) {
+        val dir = cacheDir ?: return
+        val file = File(dir, CACHE_FILE)
+        try {
+            val json = serializeSegments(segments, lat, lng)
+            file.writeText(json)
+            Log.i(TAG, "Saved ${segments.size} segments to disk cache")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save disk cache: ${e.message}")
+        }
+    }
+
+    private fun serializeSegments(segments: List<RoadSegment>, lat: Double, lng: Double): String {
+        val root = JSONObject()
+        root.put("centerLat", lat)
+        root.put("centerLng", lng)
+        root.put("timestamp", System.currentTimeMillis())
+
+        val arr = org.json.JSONArray()
+        for (seg in segments) {
+            val obj = JSONObject()
+            obj.put("type", seg.type.name)
+            val ptsArr = org.json.JSONArray()
+            for ((plat, plng) in seg.points) {
+                ptsArr.put(plat)
+                ptsArr.put(plng)
+            }
+            obj.put("points", ptsArr)
+            arr.put(obj)
+        }
+        root.put("segments", arr)
+        return root.toString()
+    }
+
+    private fun deserializeSegments(json: String): List<RoadSegment> {
+        val root = JSONObject(json)
+        val arr = root.getJSONArray("segments")
+        val segments = mutableListOf<RoadSegment>()
+
+        for (i in 0 until arr.length()) {
+            val obj = arr.getJSONObject(i)
+            val typeName = obj.getString("type")
+            val type = try { RoadType.valueOf(typeName) } catch (e: Exception) { continue }
+
+            val ptsArr = obj.getJSONArray("points")
+            val points = mutableListOf<Pair<Double, Double>>()
+            for (j in 0 until ptsArr.length() step 2) {
+                points.add(Pair(ptsArr.getDouble(j), ptsArr.getDouble(j + 1)))
+            }
+
+            if (points.size >= 2) {
+                segments.add(RoadSegment(type, points))
+            }
+        }
+
+        // 恢复缓存中心坐标
+        cacheCenterLat = root.optDouble("centerLat", 0.0)
+        cacheCenterLng = root.optDouble("centerLng", 0.0)
+
+        return segments.sortedBy { it.type.priority }
+    }
+
+    /**
+     * 获取路网数据（内存缓存 + 磁盘缓存 + 网络）
      */
     suspend fun fetchRoads(lat: Double, lng: Double): List<RoadSegment> = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
         val dist = haversine(lat, lng, cacheCenterLat, cacheCenterLng)
 
-        // 缓存命中：位置没变太远且时间没过久
+        // 内存缓存命中
         if (cachedSegments.isNotEmpty() && dist < 200.0 && (now - lastFetchTime) < 15000) {
             return@withContext cachedSegments
         }
@@ -116,21 +207,23 @@ object RoadFetcher {
             cacheCenterLng = lng
             lastFetchTime = now
 
-            Log.i(TAG, "Fetched ${segments.size} road segments (${segments.sumOf { it.points.size }} points)")
+            // 保存到磁盘
+            saveDiskCache(segments, lat, lng)
+
+            Log.i(TAG, "Fetched ${segments.size} road segments")
             segments
         } catch (e: Exception) {
             Log.e(TAG, "Overpass fetch failed: ${e.message}")
-            cachedSegments // 返回旧缓存
+            cachedSegments
         }
     }
 
     private fun buildQuery(lat: Double, lng: Double): String {
-        // out tags 确保返回 bridge/tunnel/layer 等标签
         return """
             [out:json][timeout:10];
             way["highway"~"motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link|tertiary|tertiary_link|residential|living_street|unclassified|service"]
             (around:$RADIUS,$lat,$lng);
-            out tags;
+            out body;
             >;
             out skel qt;
         """.trimIndent()
@@ -140,7 +233,6 @@ object RoadFetcher {
         val root = JSONObject(json)
         val elements = root.getJSONArray("elements")
 
-        // 先收集所有 node
         val nodes = mutableMapOf<Long, Pair<Double, Double>>()
         for (i in 0 until elements.length()) {
             val el = elements.getJSONObject(i)
@@ -149,10 +241,7 @@ object RoadFetcher {
             }
         }
 
-        // 再解析 way → 路段
         val segments = mutableListOf<RoadSegment>()
-        var elevatedCount = 0
-        var tunnelCount = 0
         for (i in 0 until elements.length()) {
             val el = elements.getJSONObject(i)
             if (el.getString("type") != "way") continue
@@ -160,30 +249,6 @@ object RoadFetcher {
             val tags = el.optJSONObject("tags") ?: continue
             val highway = tags.optString("highway", "")
             val roadType = RoadType.fromHighway(highway)
-
-            // 解析高架/隧道/层级标签
-            val bridge = tags.optString("bridge", "")
-            val tunnel = tags.optString("tunnel", "")
-            val layerStr = tags.optString("layer", "0")
-            val layer = layerStr.toIntOrNull() ?: 0
-
-            val hasBridge = bridge.isNotEmpty() && bridge != "no"
-            val hasTunnel = tunnel.isNotEmpty() && tunnel != "no"
-            val isElevated = hasBridge || layer > 0
-            val isTunnel = hasTunnel || layer < 0
-
-            // 重庆式多层立交：bridge=yes 但没标 layer → 默认 layer=1
-            // layer=2, 3, 4 → 多层高架，渲染时按层偏移
-            val effectiveLayer = when {
-                isElevated && layer <= 0 -> 1   // bridge=yes 但无 layer 标签 → 第一层
-                isElevated -> layer              // 有明确 layer 值
-                isTunnel && layer >= 0 -> -1     // tunnel=yes 但无 layer → 地下一层
-                isTunnel -> layer                // 有明确负 layer 值
-                else -> 0                        // 地面
-            }
-
-            if (isElevated) elevatedCount++
-            if (isTunnel) tunnelCount++
 
             val nodeIds = el.getJSONArray("nodes")
             val points = mutableListOf<Pair<Double, Double>>()
@@ -193,13 +258,10 @@ object RoadFetcher {
             }
 
             if (points.size >= 2) {
-                segments.add(RoadSegment(roadType, points, isElevated, isTunnel, effectiveLayer))
+                segments.add(RoadSegment(roadType, points))
             }
         }
 
-        Log.i(TAG, "Road segments: ${segments.size} total, $elevatedCount elevated, $tunnelCount tunnel")
-
-        // 按优先级排序：小路先画（底层），大路后画（上层）
         return segments.sortedBy { it.type.priority }
     }
 
@@ -211,7 +273,7 @@ object RoadFetcher {
         conn.connectTimeout = 8000
         conn.readTimeout = 12000
         conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
-        conn.setRequestProperty("User-Agent", "HudNavi/7.0")
+        conn.setRequestProperty("User-Agent", "HudNavi/9.0")
 
         conn.outputStream.use { it.write(body.toByteArray()) }
 
@@ -220,9 +282,6 @@ object RoadFetcher {
         }
     }
 
-    /**
-     * Haversine 距离（米）
-     */
     fun haversine(lat1: Double, lng1: Double, lat2: Double, lng2: Double): Double {
         val R = 6371000.0
         val dLat = Math.toRadians(lat2 - lat1)
@@ -231,9 +290,6 @@ object RoadFetcher {
         return R * 2 * atan2(sqrt(a), sqrt(1 - a))
     }
 
-    /**
-     * 缓存是否覆盖指定坐标（距缓存中心 < 800m）
-     */
     fun isCacheValid(lat: Double, lng: Double): Boolean {
         return cachedSegments.isNotEmpty() && haversine(lat, lng, cacheCenterLat, cacheCenterLng) < 800.0
     }
