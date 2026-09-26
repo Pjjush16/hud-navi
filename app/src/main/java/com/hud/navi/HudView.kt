@@ -25,11 +25,12 @@ import android.view.View
 import kotlin.math.*
 
 /**
- * hud-navi v9.5a — 镜像阴影 CLAMP 方向彻底修正
+ * hud-navi v9.6 — 镜像渐变起点修正（从速度表位置开始绘制）
  *
- * v9.5a 变更：
- * - 交换渐变起止坐标(0f,h→0f,h-fadeHeight)，CLAMP 延伸透明色而非黑色
- * - 纯黑仅覆盖速度计区域(约屏幕底部1/4)，路网区域全部透明可见
+ * v9.6 变更：
+ * - 镜像模式下渐变起点从 canvas y=h 改为 y=speedometerBot(180f)
+ * - CLAMP y<speedBot 延伸 BLACK(速度表区纯黑)，y>speedBot+fadeHeight 延伸 TRANSPARENT(路网透明)
+ * - 不再用 canvas y=h 作起点导致 CLAMP 把黑色铺满整个路网
  */
 class HudView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
@@ -157,17 +158,20 @@ class HudView @JvmOverloads constructor(
         drawRoadNetwork(canvas, w, h, metersPerPixel)
         drawVehicleMarker(canvas, w, h)
 
-        // 顶部渐变遮罩：路网向上逐渐淡出为纯黑
-        // 非镜像：canvas y=0(视觉顶部) BLACK → y=fadeHeight TRANSPARENT，
-        //   CLAMP y>fadeHeight 保持透明，路网区域干净 ✓
-        // 镜像：画布翻转后 canvas y=h 对应视觉底部(速度计区)，
-        //   canvas y=h BLACK → canvas y=h-fadeHeight TRANSPARENT，
-        //   CLAMP y<h-fadeHeight 保持透明，路网区域干净 ✓
+        // 渐变遮罩：速度表区域纯黑，路网区域透明，中间渐变过渡
+        // 速度表底部边界（canvas 坐标）：speedY(120) + 文字高度(40) + 下间距(20) = 180f
+        val speedBot = 180f
         val fadeHeight = h * 0.28f
         val fadeShader = if (mirrorEnabled) {
-            LinearGradient(0f, h, 0f, h - fadeHeight,
+            // 镜像翻转后，速度表在 canvas 顶部(y≈0~180)，视觉在屏幕底部
+            // 渐变从速度表底部开始，向上(canvas y 增大方向)过渡到透明
+            // CLAMP y<speedBot → BLACK(速度表区纯黑)
+            // CLAMP y>speedBot+fadeHeight → TRANSPARENT(路网区透明)
+            LinearGradient(0f, speedBot, 0f, speedBot + fadeHeight,
                 Color.BLACK, Color.TRANSPARENT, Shader.TileMode.CLAMP)
         } else {
+            // 非镜像：速度表在 canvas 顶部 = 视觉顶部
+            // CLAMP y<0 → BLACK，CLAMP y>fadeHeight → TRANSPARENT(路网区透明)
             LinearGradient(0f, 0f, 0f, fadeHeight,
                 Color.BLACK, Color.TRANSPARENT, Shader.TileMode.CLAMP)
         }
