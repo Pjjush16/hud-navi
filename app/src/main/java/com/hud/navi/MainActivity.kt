@@ -51,6 +51,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlin.math.*
+import java.io.File
 
 /**
  * HUD 导航 v9.0 — 回滚地图绘制到气压计之前
