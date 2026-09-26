@@ -25,13 +25,12 @@ import android.view.View
 import kotlin.math.*
 
 /**
- * hud-navi v9.0 — 极简 HUD + 上帝视角 + 道路吸附 + 速度制缩放 + 镜像
+ * hud-navi v9.1 — 顶部渐变 + 速度变色车标
  *
- * v9.0 变更（回滚地图绘制到气压计之前）：
- * - 移除所有高架/隧道/层级相关渲染
- * - 移除气压计依赖
- * - 新增 HUD 镜像（垂直翻转，挡风玻璃投影必需）
- * - 路网纯平面绘制，仅按道路类型分层着色
+ * v9.1 变更：
+ * - 顶部渐变遮罩：路网向上逐渐淡出为纯黑，速度显示区域干净
+ * - 车标颜色随速度变化：绿(0) → 黄(60) → 红(120+)
+ * - 速度数字也随车标同色
  */
 class HudView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
@@ -76,6 +75,26 @@ class HudView @JvmOverloads constructor(
         color = Color.parseColor("#666666"); textSize = 28f
         typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
         textAlign = Paint.Align.CENTER
+    }
+
+    // === 顶部渐变遮罩画笔（路网淡出效果） ===
+    private val topFadePaint = Paint().apply { style = Paint.Style.FILL }
+
+    // === 速度 → 颜色插值 ===
+    private fun getSpeedColor(speedKmh: Float): Int {
+        val t = (speedKmh / 120f).coerceIn(0f, 1f)
+        return when {
+            t <= 0.5f -> {
+                // 绿 → 黄
+                val r = (t / 0.5f)
+                Color.rgb((r * 255).toInt(), 255, 0)
+            }
+            else -> {
+                // 黄 → 红
+                val r = ((t - 0.5f) / 0.5f)
+                Color.rgb(255, (255 * (1f - r)).toInt(), 0)
+            }
+        }
     }
 
     private val vehicleFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -138,7 +157,22 @@ class HudView @JvmOverloads constructor(
 
         drawRoadNetwork(canvas, w, h, metersPerPixel)
         drawVehicleMarker(canvas, w, h)
-        drawSpeedometer(canvas, w)
+
+        // 顶部渐变遮罩：路网向上逐渐淡出为纯黑
+        // 镜像时画布底部 = 视觉顶部，渐变方向自动适应
+        val fadeHeight = h * 0.28f
+        val fadeShader = if (mirrorEnabled) {
+            LinearGradient(0f, h, 0f, h - fadeHeight,
+                Color.BLACK, Color.TRANSPARENT, Shader.TileMode.CLAMP)
+        } else {
+            LinearGradient(0f, 0f, 0f, fadeHeight,
+                Color.BLACK, Color.TRANSPARENT, Shader.TileMode.CLAMP)
+        }
+        topFadePaint.shader = fadeShader
+        canvas.drawRect(0f, 0f, w, h, topFadePaint)
+
+        // 速度显示（在镜像块内部，随镜像翻转）
+        drawSpeedometer(canvas, w, h)
 
         if (mirrorEnabled) {
             canvas.restore()
@@ -197,7 +231,15 @@ class HudView @JvmOverloads constructor(
         val cx = w / 2f
         val cy = h * 0.55f
 
+        // 车标颜色随速度变化：绿→黄→红
+        val speedColor = getSpeedColor(vehicleSpeed)
+        vehicleFillPaint.color = speedColor
+        vehicleStrokePaint.color = speedColor
+
         if (isSnapped) {
+            // 吸附光晕也用速度色
+            snapGlowPaint.color = Color.argb(0x33,
+                Color.red(speedColor), Color.green(speedColor), Color.blue(speedColor))
             canvas.drawCircle(cx, cy, 30f, snapGlowPaint)
         }
 
@@ -222,10 +264,13 @@ class HudView @JvmOverloads constructor(
         canvas.drawPath(dartPath, vehicleStrokePaint)
     }
 
-    private fun drawSpeedometer(canvas: Canvas, w: Float) {
+    private fun drawSpeedometer(canvas: Canvas, w: Float, h: Float) {
         val cx = w / 2f
         val speedY = 120f
         val speedStr = vehicleSpeed.toInt().toString()
+
+        // 速度数字随车标同色
+        speedNumPaint.color = getSpeedColor(vehicleSpeed)
         canvas.drawText(speedStr, cx, speedY, speedNumPaint)
         canvas.drawText("km/h", cx, speedY + 40f, speedUnitPaint)
     }
