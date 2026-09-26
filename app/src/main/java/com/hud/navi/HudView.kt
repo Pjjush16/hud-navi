@@ -25,12 +25,11 @@ import android.view.View
 import kotlin.math.*
 
 /**
- * hud-navi v9.1 — 顶部渐变 + 速度变色车标
+ * hud-navi v9.3 — 镜像阴影修复 + 阴影加宽
  *
- * v9.1 变更：
- * - 顶部渐变遮罩：路网向上逐渐淡出为纯黑，速度显示区域干净
- * - 车标颜色随速度变化：绿(0) → 黄(60) → 红(120+)
- * - 速度数字也随车标同色
+ * v9.3 变更：
+ * - 修复镜像模式下顶部阴影（渐变遮罩）方向未跟随翻转
+ * - 渐变区域从 28% 加宽到 40%，阴影更明显
  */
 class HudView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
@@ -159,11 +158,12 @@ class HudView @JvmOverloads constructor(
         drawVehicleMarker(canvas, w, h)
 
         // 顶部渐变遮罩：路网向上逐渐淡出为纯黑
-        // 镜像时画布底部 = 视觉顶部，渐变方向自动适应
-        val fadeHeight = h * 0.28f
+        // 镜像时画布翻转，渐变方向需反转（TRANSPARENT→BLACK 使视觉顶部为黑色）
+        // 加宽渐变区域使阴影更明显
+        val fadeHeight = h * 0.40f
         val fadeShader = if (mirrorEnabled) {
             LinearGradient(0f, h, 0f, h - fadeHeight,
-                Color.BLACK, Color.TRANSPARENT, Shader.TileMode.CLAMP)
+                Color.TRANSPARENT, Color.BLACK, Shader.TileMode.CLAMP)
         } else {
             LinearGradient(0f, 0f, 0f, fadeHeight,
                 Color.BLACK, Color.TRANSPARENT, Shader.TileMode.CLAMP)
