@@ -11,8 +11,8 @@ android {
         applicationId = "com.hud.navi"
         minSdk = 21
         targetSdk = 34
-        versionCode = 48
-        versionName = "9.7"
+        versionCode = 49
+        versionName = "9.8"
     }
 
     buildTypes {

@@ -25,11 +25,11 @@ import android.view.View
 import kotlin.math.*
 
 /**
- * hud-navi v9.7 — 纯渐变无纯黑区域
+ * hud-navi v9.8 — 镜像渐变与正常模式一致（28%区域）
  *
- * v9.7 变更：
- * - 镜像模式下去掉速度表区域的纯黑背景
- * - 整个画面从底端(BLACK)到顶端(TRANSPARENT)纯渐变过渡
+ * v9.8 变更：
+ * - 镜像模式下渐变覆盖视觉底部 28% 区域（与正常模式顶部 28% 对称）
+ * - CLAMP y<h-fadeHeight → TRANSPARENT，路网区域全透明
  */
 class HudView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
@@ -157,16 +157,18 @@ class HudView @JvmOverloads constructor(
         drawRoadNetwork(canvas, w, h, metersPerPixel)
         drawVehicleMarker(canvas, w, h)
 
-        // 渐变遮罩：纯渐变到顶端，无纯黑区域
+        // 渐变遮罩：视觉底部 28% 区域做 BLACK→TRANSPARENT 渐变，其余透明
+        val fadeHeight = h * 0.28f
         val fadeShader = if (mirrorEnabled) {
-            // 镜像翻转后，canvas y=h 对应视觉底部，canvas y=0 对应视觉顶部
-            // 从 canvas 底端(视觉底部) BLACK 渐变到顶端(视觉顶部) TRANSPARENT
-            // CLAMP: y<h 端延伸 BLACK（仅 y<0 即画布外），y>h 端延伸 TRANSPARENT（路网全透明）
-            LinearGradient(0f, h, 0f, 0f,
+            // 镜像翻转后 canvas y=h = 视觉底部
+            // y=h BLACK → y=h-fadeHeight TRANSPARENT
+            // CLAMP y<h-fadeHeight → TRANSPARENT（路网区域全透明）
+            LinearGradient(0f, h, 0f, h - fadeHeight,
                 Color.BLACK, Color.TRANSPARENT, Shader.TileMode.CLAMP)
         } else {
-            // 非镜像：从视觉顶部 BLACK 渐变到 fadeHeight 处 TRANSPARENT
-            val fadeHeight = h * 0.28f
+            // 非镜像：canvas y=0 = 视觉顶部
+            // y=0 BLACK → y=fadeHeight TRANSPARENT
+            // CLAMP y>fadeHeight → TRANSPARENT（路网区域全透明）
             LinearGradient(0f, 0f, 0f, fadeHeight,
                 Color.BLACK, Color.TRANSPARENT, Shader.TileMode.CLAMP)
         }
