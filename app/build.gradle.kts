@@ -11,13 +11,23 @@ android {
         applicationId = "com.hud.navi"
         minSdk = 21
         targetSdk = 34
-        versionCode = 50
-        versionName = "9.9"
+        versionCode = 51
+        versionName = "10.0"
+    }
+
+    signingConfigs {
+        create("release") {
+            storeFile = file("../keystore/hud-navi-release.jks")
+            storePassword = "hudnavi2026release"
+            keyAlias = "hud-navi"
+            keyPassword = "hudnavi2026release"
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
         }
     }
     compileOptions {

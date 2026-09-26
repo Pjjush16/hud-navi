@@ -25,11 +25,12 @@ import android.view.View
 import kotlin.math.*
 
 /**
- * hud-navi v9.9 — 添加 OSM 归属标注
+ * hud-navi v10.0 — 应用图标 + 签名发布 + GitHub Release
  *
- * v9.9 变更：
- * - HUD 画面底部显示 "© OpenStreetMap contributors"（ODbL 协议要求）
- * - RoadFetcher 文件头添加 OSM 归属声明
+ * v10.0 变更：
+ * - 新增自定义应用图标（HUD 导航风格）
+ * - 配置 release 签名（keystore）
+ * - CI 自动构建 release APK 并发布到 GitHub Releases
  */
 class HudView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
