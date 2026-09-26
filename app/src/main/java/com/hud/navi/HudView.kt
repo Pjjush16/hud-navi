@@ -25,11 +25,11 @@ import android.view.View
 import kotlin.math.*
 
 /**
- * hud-navi v9.8 — 镜像渐变与正常模式一致（28%区域）
+ * hud-navi v9.9 — 添加 OSM 归属标注
  *
- * v9.8 变更：
- * - 镜像模式下渐变覆盖视觉底部 28% 区域（与正常模式顶部 28% 对称）
- * - CLAMP y<h-fadeHeight → TRANSPARENT，路网区域全透明
+ * v9.9 变更：
+ * - HUD 画面底部显示 "© OpenStreetMap contributors"（ODbL 协议要求）
+ * - RoadFetcher 文件头添加 OSM 归属声明
  */
 class HudView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
@@ -181,6 +181,21 @@ class HudView @JvmOverloads constructor(
         if (mirrorEnabled) {
             canvas.restore()
         }
+
+        // OSM 归属标注（ODbL 协议要求，始终在视觉底部）
+        drawAttribution(canvas, w, h)
+    }
+
+    private fun drawAttribution(canvas: Canvas, w: Float, h: Float) {
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#44FFFFFF")
+            textSize = 22f
+            textAlign = Paint.Align.CENTER
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+        }
+        // 镜像时视觉底部 = canvas y=0 附近；非镜像 = canvas y=h 附近
+        val attrY = if (mirrorEnabled) 24f else h - 8f
+        canvas.drawText("© OpenStreetMap contributors", w / 2f, attrY, paint)
     }
 
     private fun drawRoadNetwork(canvas: Canvas, w: Float, h: Float, metersPerPixel: Double) {
