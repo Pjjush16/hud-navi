@@ -93,6 +93,11 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private var lastFrameTime = 0L
     private val FRAME_MS = 16L
 
+    // === 平滑绘制位置（消除吸附/脱吸附抖动） ===
+    private var smoothDrawLat = 0.0; private var smoothDrawLng = 0.0
+    private var snapBlend = 0.0  // 0=原始GPS, 1=完全吸附
+    private var snapInit = false
+
     // === 路口检测 ===
     private var intersections: List<IntersectionNode> = emptyList()
     private var nearIntersection = false
@@ -544,13 +549,35 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             snapped = hmmMapMatchWithSigma(vehicleLat, vehicleLng, targetSpeed, vehicleBearing, adaptiveSigma)
         }
 
+        // === 平滑绘制位置：消除吸附/脱吸附抖动 ===
+        // 吸附时快速融入(snapAlphaUp=0.3，~3帧达到95%)
+        // 脱吸附时缓慢退出(snapAlphaDown=0.02，~50帧≈0.8s归零)
+        if (!snapInit) {
+            smoothDrawLat = vehicleLat; smoothDrawLng = vehicleLng; snapInit = true
+        }
+        val snapAlphaUp = 0.3
+        val snapAlphaDown = 0.02
+
         if (snapped != null) {
-            hudView.snappedLat = snapped.first; hudView.snappedLng = snapped.second
-            hudView.isSnapped = true
-            hudView.vehicleLat = snapped.first; hudView.vehicleLng = snapped.second
+            snapBlend = (snapBlend + snapAlphaUp).coerceAtMost(1.0)
+            val targetLat = vehicleLat + (snapped.first - vehicleLat) * snapBlend
+            val targetLng = vehicleLng + (snapped.second - vehicleLng) * snapBlend
+            smoothDrawLat = targetLat; smoothDrawLng = targetLng
+            hudView.snappedLat = smoothDrawLat; hudView.snappedLng = smoothDrawLng
+            hudView.isSnapped = snapBlend > 0.5
+            hudView.vehicleLat = smoothDrawLat; hudView.vehicleLng = smoothDrawLng
         } else {
-            hudView.isSnapped = false
-            hudView.vehicleLat = vehicleLat; hudView.vehicleLng = vehicleLng
+            snapBlend = (snapBlend - snapAlphaDown).coerceAtLeast(0.0)
+            // snap未完全退出时仍保留部分吸附位置
+            if (snapBlend > 0.01) {
+                val targetLat = vehicleLat + (smoothDrawLat - vehicleLat) * (snapBlend)
+                val targetLng = vehicleLng + (smoothDrawLng - vehicleLng) * (snapBlend)
+                smoothDrawLat = targetLat; smoothDrawLng = targetLng
+            } else {
+                smoothDrawLat = vehicleLat; smoothDrawLng = vehicleLng
+            }
+            hudView.isSnapped = snapBlend > 0.5
+            hudView.vehicleLat = smoothDrawLat; hudView.vehicleLng = smoothDrawLng
         }
 
         hudView.vehicleBearing = vehicleBearing
