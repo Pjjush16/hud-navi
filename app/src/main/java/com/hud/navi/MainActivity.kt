@@ -87,6 +87,12 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private var wakeWordManager: WakeWordManager? = null
     private var wakeWordEnabled = false
 
+    // === 唤醒反馈 UI（在 flipContainer 外面，不受镜像影响） ===
+    private lateinit var wakeFeedback: FrameLayout
+    private lateinit var wakeFeedbackPanel: LinearLayout
+    private lateinit var wakeFeedbackKeyword: TextView
+    private var wakeFeedbackHideRunnable: Runnable? = null
+
     // === GPS 目标 ===
     private var targetLat = 0.0; private var targetLng = 0.0
     private var targetBearing = 0f; private var targetSpeed = 0f
@@ -328,6 +334,11 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         btnRetryPerm = findViewById(R.id.btnRetryPerm)
         hudView = findViewById(R.id.hudView)
 
+        // 唤醒反馈 UI
+        wakeFeedback = findViewById(R.id.wakeFeedback)
+        wakeFeedbackPanel = findViewById(R.id.wakeFeedbackPanel)
+        wakeFeedbackKeyword = findViewById(R.id.wakeFeedbackKeyword)
+
         locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
 
@@ -376,11 +387,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         try {
             wakeWordManager = WakeWordManager(this) { keyword ->
                 Log.i(TAG, "Wake word detected: $keyword")
-                // 唤醒后的回调 — 目前先 Toast 提示，后续接入语音指令识别
-                handler.post {
-                    Toast.makeText(this, "已唤醒: $keyword", Toast.LENGTH_SHORT).show()
-                    hudView.statusText = "语音已唤醒: $keyword"
-                }
+                handler.post { showWakeFeedback(keyword) }
             }
             wakeWordManager?.init()
             if (wakeWordManager?.isReady() == true) {
@@ -827,5 +834,43 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         roadFetchJob?.cancel(); scope.cancel()
         stopService(Intent(this, HudForegroundService::class.java))
         super.onDestroy()
+    }
+
+    /**
+     * 唤醒词触发后的视觉反馈：
+     * 底部黑色渐变面板上滑 + "我在" + 唤醒词名称
+     * 2秒后自动收回
+     */
+    private fun showWakeFeedback(keyword: String) {
+        // 取消之前的隐藏计时器
+        wakeFeedbackHideRunnable?.let { handler.removeCallbacks(it) }
+
+        wakeFeedback.visibility = View.VISIBLE
+        wakeFeedbackKeyword.text = keyword
+
+        // 滑入动画：从底部上滑
+        wakeFeedbackPanel.animate()
+            .translationY(0f)
+            .setDuration(300)
+            .alpha(1f)
+            .withStartAction {
+                wakeFeedbackPanel.alpha = 0f
+            }
+            .start()
+
+        // 2秒后自动收回
+        wakeFeedbackHideRunnable = Runnable { hideWakeFeedback() }
+        handler.postDelayed(wakeFeedbackHideRunnable!!, 2000)
+    }
+
+    private fun hideWakeFeedback() {
+        wakeFeedbackPanel.animate()
+            .translationY(120f)
+            .alpha(0f)
+            .setDuration(300)
+            .withEndAction {
+                wakeFeedback.visibility = View.GONE
+            }
+            .start()
     }
 }

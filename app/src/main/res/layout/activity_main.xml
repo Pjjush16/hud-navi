@@ -18,6 +18,52 @@
 
     </FrameLayout>
 
+    <!-- 唤醒词反馈面板（在 flipContainer 外面，不受镜像影响） -->
+    <FrameLayout
+        android:id="@+id/wakeFeedback"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone"
+        android:clickable="false"
+        android:focusable="false">
+
+        <!-- 底部渐变 + "我在" 文字 -->
+        <LinearLayout
+            android:id="@+id/wakeFeedbackPanel"
+            android:layout_width="match_parent"
+            android:layout_height="120dp"
+            android:layout_gravity="bottom"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:background="@drawable/wake_gradient_bg"
+            android:translationY="120dp">
+
+            <TextView
+                android:id="@+id/wakeFeedbackText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="我在"
+                android:textColor="#FFFFFF"
+                android:textSize="28sp"
+                android:textStyle="bold"
+                android:letterSpacing="0.15"
+                android:shadowColor="#80000000"
+                android:shadowDx="0"
+                android:shadowDy="2"
+                android:shadowRadius="4" />
+
+            <TextView
+                android:id="@+id/wakeFeedbackKeyword"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="#99FFFFFF"
+                android:textSize="14sp"
+                android:layout_marginTop="4dp" />
+
+        </LinearLayout>
+
+    </FrameLayout>
+
     <!-- 权限被拒提示（居中，默认隐藏） -->
     <LinearLayout
         android:id="@+id/permDeniedLayout"
