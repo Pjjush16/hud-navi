@@ -35,41 +35,30 @@ jobs:
           mkdir -p app/libs
           mkdir -p app/src/main/jniLibs
           
-          # Download AAR (Java/Kotlin API)
-          AAR_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/v${SHERPA_VERSION}/sherpa-onnx-v${SHERPA_VERSION}.aar"
+          # Download AAR (Java/Kotlin API) — 从 AAR 中提取单架构 native libs
+          AAR_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/v${SHERPA_VERSION}/sherpa-onnx-${SHERPA_VERSION}.aar"
           echo "Downloading AAR: $AAR_URL"
-          if wget -q "$AAR_URL" -O app/libs/sherpa-onnx.aar 2>&1; then
-            echo "AAR downloaded: $(stat -c%s app/libs/sherpa-onnx.aar) bytes"
-          else
-            echo "WARNING: AAR download failed, trying alternative naming..."
-            # Try without 'v' prefix
-            wget -q "https://github.com/k2-fsa/sherpa-onnx/releases/download/v${SHERPA_VERSION}/sherpa-onnx-${SHERPA_VERSION}.aar" \
-              -O app/libs/sherpa-onnx.aar || echo "AAR not available"
-          fi
-          
-          # Download JNI .so files for all ABIs
-          SO_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/v${SHERPA_VERSION}/sherpa-onnx-v${SHERPA_VERSION}-android.tar.bz2"
-          echo "Downloading JNI libs: $SO_URL"
-          if wget -q "$SO_URL" -O /tmp/sherpa-onnx-android.tar.bz2 2>&1; then
+          if wget -q "$AAR_URL" -O /tmp/sherpa-onnx.aar 2>&1; then
+            echo "AAR downloaded: $(stat -c%s /tmp/sherpa-onnx.aar) bytes"
+            # 只保留 arm64-v8a（现代手机），去掉 armeabi-v7a 以减小体积
+            mkdir -p app/src/main/jniLibs/arm64-v8a
             cd /tmp
-            tar xjf sherpa-onnx-android.tar.bz2
-            # Copy .so files for each ABI
-            for abi in arm64-v8a armeabi-v7a; do
-              mkdir -p ${{ github.workspace }}/app/src/main/jniLibs/$abi
-              if [ -d "sherpa-onnx-v${SHERPA_VERSION}-android/$abi" ]; then
-                cp sherpa-onnx-v${SHERPA_VERSION}-android/$abi/*.so \
-                   ${{ github.workspace }}/app/src/main/jniLibs/$abi/ 2>/dev/null || true
-              fi
-            done
+            mkdir -p aar_extract
+            unzip -o sherpa-onnx.aar -d aar_extract/ > /dev/null 2>&1
+            # 复制 classes.jar 作为 AAR 的替代
+            cp aar_extract/classes.jar ${{ github.workspace }}/app/libs/sherpa-onnx-classes.jar 2>/dev/null || true
+            # 复制 arm64-v8a native libs
+            if [ -d "aar_extract/jni/arm64-v8a" ]; then
+              cp aar_extract/jni/arm64-v8a/*.so ${{ github.workspace }}/app/src/main/jniLibs/arm64-v8a/ 2>/dev/null || true
+            fi
             cd ${{ github.workspace }}
-            echo "JNI libs installed:"
-            find app/src/main/jniLibs -name "*.so" | head -10
+            echo "Native libs installed (arm64-v8a only):"
+            ls -la app/src/main/jniLibs/arm64-v8a/ 2>/dev/null || echo "(empty)"
+            echo "Classes jar:"
+            ls -la app/libs/ 2>/dev/null || echo "(empty)"
           else
-            echo "WARNING: JNI libs download failed"
+            echo "WARNING: AAR download failed"
           fi
-          
-          echo "libs dir:"
-          ls -la app/libs/ 2>/dev/null || echo "(empty)"
 
       - name: Download KWS Model
         run: |

@@ -158,9 +158,15 @@ class HudView @JvmOverloads constructor(
         drawRoadNetwork(canvas, w, h, metersPerPixel)
         drawVehicleMarker(canvas, w, h)
 
+        // 速度显示（在镜像块内部，随镜像翻转）
+        drawSpeedometer(canvas, w, h)
+
         if (mirrorEnabled) {
             canvas.restore()
         }
+
+        // OSM 归属标注（ODbL 协议要求，始终在视觉底部）
+        drawAttribution(canvas, w, h)
     }
 
     private fun drawAttribution(canvas: Canvas, w: Float, h: Float) {
@@ -227,9 +233,17 @@ class HudView @JvmOverloads constructor(
         val cx = w / 2f
         val cy = h * 0.55f
 
-        // 车标固定白色
-        vehicleFillPaint.color = Color.WHITE
-        vehicleStrokePaint.color = Color.WHITE
+        // 车标颜色随速度变化：绿→黄→红
+        val speedColor = getSpeedColor(vehicleSpeed)
+        vehicleFillPaint.color = speedColor
+        vehicleStrokePaint.color = speedColor
+
+        if (isSnapped) {
+            // 吸附光晕也用速度色
+            snapGlowPaint.color = Color.argb(0x33,
+                Color.red(speedColor), Color.green(speedColor), Color.blue(speedColor))
+            canvas.drawCircle(cx, cy, 30f, snapGlowPaint)
+        }
 
         val size = 28f
         val tipY = cy - size * 1.4f
