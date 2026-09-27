@@ -9,6 +9,9 @@ on:
 permissions:
   contents: write
 
+env:
+  SHERPA_ONNX_VERSION: "1.10.38"
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -23,6 +26,46 @@ jobs:
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
+
+      - name: Download sherpa-onnx Android SDK
+        run: |
+          SHERPA_VERSION="${{ env.SHERPA_ONNX_VERSION }}"
+          echo "Downloading sherpa-onnx v${SHERPA_VERSION} Android SDK..."
+          
+          mkdir -p app/libs
+          mkdir -p app/src/main/jniLibs
+          
+          # Download AAR — 直接使用完整 AAR 文件
+          AAR_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/v${SHERPA_VERSION}/sherpa-onnx-${SHERPA_VERSION}.aar"
+          echo "Downloading AAR: $AAR_URL"
+          if wget -q "$AAR_URL" -O app/libs/sherpa-onnx.aar 2>&1; then
+            echo "AAR downloaded: $(stat -c%s app/libs/sherpa-onnx.aar) bytes"
+            ls -lh app/libs/sherpa-onnx.aar
+          else
+            echo "WARNING: AAR download failed"
+          fi
+
+      - name: Download KWS Model
+        run: |
+          MODEL_DIR="app/src/main/assets/kws"
+          mkdir -p "$MODEL_DIR"
+          
+          if [ ! -f "$MODEL_DIR/tokens.txt" ]; then
+            echo "Downloading sherpa-onnx KWS model..."
+            wget -q "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile.tar.bz2" \
+              -O /tmp/kws-model.tar.bz2
+            tar xjf /tmp/kws-model.tar.bz2 -C /tmp/
+            
+            cp /tmp/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/tokens.txt "$MODEL_DIR/"
+            cp /tmp/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx "$MODEL_DIR/"
+            cp /tmp/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/decoder-epoch-12-avg-2-chunk-16-left-64.onnx "$MODEL_DIR/"
+            cp /tmp/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx "$MODEL_DIR/"
+            
+            echo "Model files:"
+            ls -la "$MODEL_DIR"
+          else
+            echo "Model files already exist"
+          fi
 
       - name: Build Debug APK
         run: ./gradlew assembleDebug
@@ -63,6 +106,7 @@ jobs:
             - Signed release APK
             - OpenStreetMap data attribution
             - Mirror mode for windshield HUD projection
+            - **语音唤醒词识别** (哈德/你好小哈/小哈/哈德哈德)
             
             Commit: `${{ github.sha }}`
           files: |
