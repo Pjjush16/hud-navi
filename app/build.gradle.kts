@@ -11,11 +11,17 @@ android {
         applicationId = "com.hud.navi"
         minSdk = 21
         targetSdk = 34
-        versionCode = 57
-        versionName = "10.6"
+        versionCode = 58
+        versionName = "10.7"
+    }
 
-        ndk {
-            abiFilters += listOf("arm64-v8a")
+    // ABI 分包：输出 arm64-v8a / armeabi-v7a / universal 三个 APK
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a")
+            isUniversalApk = true
         }
     }
 

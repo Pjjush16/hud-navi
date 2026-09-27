@@ -35,27 +35,28 @@ jobs:
           mkdir -p app/libs
           mkdir -p app/src/main/jniLibs
           
-          # Download AAR (Java/Kotlin API) — 从 AAR 中提取单架构 native libs
+          # Download AAR — 提取 classes.jar + 两个架构的 native libs
           AAR_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/v${SHERPA_VERSION}/sherpa-onnx-${SHERPA_VERSION}.aar"
           echo "Downloading AAR: $AAR_URL"
           if wget -q "$AAR_URL" -O /tmp/sherpa-onnx.aar 2>&1; then
             echo "AAR downloaded: $(stat -c%s /tmp/sherpa-onnx.aar) bytes"
-            # 只保留 arm64-v8a（现代手机），去掉 armeabi-v7a 以减小体积
-            mkdir -p app/src/main/jniLibs/arm64-v8a
             cd /tmp
             mkdir -p aar_extract
             unzip -o sherpa-onnx.aar -d aar_extract/ > /dev/null 2>&1
-            # 复制 classes.jar 作为 AAR 的替代
+            # 提取 classes.jar（Java API）
             cp aar_extract/classes.jar ${{ github.workspace }}/app/libs/sherpa-onnx-classes.jar 2>/dev/null || true
-            # 复制 arm64-v8a native libs
-            if [ -d "aar_extract/jni/arm64-v8a" ]; then
-              cp aar_extract/jni/arm64-v8a/*.so ${{ github.workspace }}/app/src/main/jniLibs/arm64-v8a/ 2>/dev/null || true
-            fi
+            # 提取两个架构的 native libs
+            for abi in arm64-v8a armeabi-v7a; do
+              mkdir -p ${{ github.workspace }}/app/src/main/jniLibs/$abi
+              if [ -d "aar_extract/jni/$abi" ]; then
+                cp aar_extract/jni/$abi/*.so \
+                   ${{ github.workspace }}/app/src/main/jniLibs/$abi/ 2>/dev/null || true
+                echo "$abi native libs installed: $(ls ${{ github.workspace }}/app/src/main/jniLibs/$abi/ 2>/dev/null | wc -l) files"
+              fi
+            done
             cd ${{ github.workspace }}
-            echo "Native libs installed (arm64-v8a only):"
-            ls -la app/src/main/jniLibs/arm64-v8a/ 2>/dev/null || echo "(empty)"
             echo "Classes jar:"
-            ls -la app/libs/ 2>/dev/null || echo "(empty)"
+            ls -lh app/libs/ 2>/dev/null || echo "(empty)"
           else
             echo "WARNING: AAR download failed"
           fi
