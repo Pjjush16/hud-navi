@@ -11,8 +11,8 @@ android {
         applicationId = "com.hud.navi"
         minSdk = 21
         targetSdk = 34
-        versionCode = 51
-        versionName = "10.0"
+        versionCode = 52
+        versionName = "10.1"
     }
 
     signingConfigs {
@@ -46,5 +46,6 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 
     // sherpa-onnx: 离线关键词识别（中文唤醒词）
-    implementation("com.k2fsa.sherpa:onnx:1.10.32")
+    // AAR 由 CI workflow 自动下载到 app/libs/
+    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar", "*.jar"))))
 }

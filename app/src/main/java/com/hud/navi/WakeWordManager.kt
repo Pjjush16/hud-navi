@@ -8,8 +8,11 @@
  *   - 小哈
  *   - 哈德哈德
  *
+ * 模型: sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile
+ *
  * 使用方式：
- *   val wm = WakeWordManager(context, onWake = { keyword -> Log.i("WAKE", keyword) })
+ *   val wm = WakeWordManager(context) { keyword -> ... }
+ *   wm.init()    // 在 onCreate 中调用
  *   wm.start()   // 在 onResume 中调用
  *   wm.stop()    // 在 onPause 中调用
  */
@@ -35,16 +38,15 @@ class WakeWordManager(
     companion object {
         private const val TAG = "WakeWord"
         private const val SAMPLE_RATE = 16000
-        private const val CHANNELS = 1
 
-        // 模型文件在 assets 中的路径
-        private const val ASSET_ENCODER = "kws/encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx"
-        private const val ASSET_DECODER = "kws/decoder-epoch-12-avg-2-chunk-16-left-64.onnx"
-        private const val ASSET_JOINER = "kws/joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx"
-        private const val ASSET_TOKENS = "kws/tokens.txt"
-        private const val ASSET_KEYWORDS = "kws/keywords.txt"
+        // 模型文件在 assets 中的相对路径
+        private const val ASSET_DIR = "kws"
+        private const val ENCODER_FILE = "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx"
+        private const val DECODER_FILE = "decoder-epoch-12-avg-2-chunk-16-left-64.onnx"
+        private const val JOINER_FILE = "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx"
+        private const val TOKENS_FILE = "tokens.txt"
+        private const val KEYWORDS_FILE = "keywords.txt"
 
-        // 模型释放到内部存储后的路径
         private const val MODEL_DIR = "kws_models"
     }
 
@@ -53,106 +55,171 @@ class WakeWordManager(
     private val running = AtomicBoolean(false)
     private var kwsReady = false
 
-    // sherpa-onnx 对象（通过反射加载，避免编译期依赖）
-    private var keywordSpotter: Any? = null
-    private var stream: Any? = null
+    // sherpa-onnx 对象（延迟绑定，避免编译期硬依赖）
+    private var spotter: Any? = null
+    private var kwsStream: Any? = null
 
-    /**
-     * 初始化：从 assets 复制模型文件到内部存储，创建 KeywordSpotter
-     */
+    // 缓存反射方法
+    private var createStreamMethod: java.lang.reflect.Method? = null
+    private var isReadyMethod: java.lang.reflect.Method? = null
+    private var decodeStreamMethod: java.lang.reflect.Method? = null
+    private var getResultMethod: java.lang.reflect.Method? = null
+    private var resetStreamMethod: java.lang.reflect.Method? = null
+    private var acceptWaveformMethod: java.lang.reflect.Method? = null
+    private var streamClass: Class<*>? = null
+
     fun init() {
         try {
-            // 1. 复制模型文件到内部存储
             val modelDir = File(context.filesDir, MODEL_DIR)
             if (!modelDir.exists()) modelDir.mkdirs()
 
-            val files = listOf(ASSET_ENCODER, ASSET_DECODER, ASSET_JOINER, ASSET_TOKENS, ASSET_KEYWORDS)
-            for (assetPath in files) {
-                val fileName = assetPath.substringAfterLast("/")
-                val targetFile = File(modelDir, fileName)
-                if (!targetFile.exists() || targetFile.length() < 100) {
-                    Log.i(TAG, "Extracting asset: $assetPath")
+            // 1. 从 assets 释放模型文件到内部存储
+            val modelFiles = listOf(ENCODER_FILE, DECODER_FILE, JOINER_FILE, TOKENS_FILE, KEYWORDS_FILE)
+            var allReady = true
+
+            for (fileName in modelFiles) {
+                val target = File(modelDir, fileName)
+                if (!target.exists() || target.length() < 100) {
                     try {
-                        context.assets.open(assetPath).use { input ->
-                            FileOutputStream(targetFile).use { output ->
+                        context.assets.open("$ASSET_DIR/$fileName").use { input ->
+                            FileOutputStream(target).use { output ->
                                 input.copyTo(output)
                             }
                         }
-                        Log.i(TAG, "  -> ${targetFile.length()} bytes")
+                        Log.i(TAG, "Extracted: $fileName (${target.length()} bytes)")
                     } catch (e: Exception) {
-                        Log.w(TAG, "Asset not found: $assetPath (${e.message})")
-                        Log.w(TAG, "Please run download_model.sh and copy files to assets/kws/")
-                        return
+                        Log.w(TAG, "Asset missing: $ASSET_DIR/$fileName — ${e.message}")
+                        allReady = false
                     }
                 }
             }
 
-            // 2. 创建 KeywordSpotter（通过 sherpa-onnx Java API）
-            val encoderPath = File(modelDir, "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx").absolutePath
-            val decoderPath = File(modelDir, "decoder-epoch-12-avg-2-chunk-16-left-64.onnx").absolutePath
-            val joinerPath = File(modelDir, "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx").absolutePath
-            val tokensPath = File(modelDir, "tokens.txt").absolutePath
-            val keywordsPath = File(modelDir, "keywords.txt").absolutePath
-
-            // 验证文件存在
-            for (path in listOf(encoderPath, decoderPath, joinerPath, tokensPath, keywordsPath)) {
-                if (!File(path).exists()) {
-                    Log.e(TAG, "Model file missing: $path")
-                    return
-                }
+            if (!allReady) {
+                Log.w(TAG, "Model files incomplete. Run download_kws_model.sh first.")
+                return
             }
 
-            // 使用 sherpa-onnx Java API
-            val kwsClass = Class.forName("com.k2fsa.sherpa.onnx.KeywordSpotter")
-            val configClass = Class.forName("com.k2fsa.sherpa.onnx.KeywordSpotterConfig")
+            // 2. 通过反射创建 KeywordSpotter（避免编译期对 sherpa-onnx 的强依赖）
+            val encoderPath = File(modelDir, ENCODER_FILE).absolutePath
+            val decoderPath = File(modelDir, DECODER_FILE).absolutePath
+            val joinerPath = File(modelDir, JOINER_FILE).absolutePath
+            val tokensPath = File(modelDir, TOKENS_FILE).absolutePath
+            val keywordsPath = File(modelDir, KEYWORDS_FILE).absolutePath
 
-            val config = configClass.getConstructor(
-                String::class.java, // tokens
-                String::class.java, // encoder
-                String::class.java, // decoder
-                String::class.java, // joiner
-                String::class.java, // keywordsFile
-                Int::class.javaPrimitiveType, // numThreads
-                Float::class.javaPrimitiveType, // sampleRate
-                Int::class.javaPrimitiveType, // featureDim
-                Int::class.javaPrimitiveType, // maxActivePaths
-                Float::class.javaPrimitiveType, // keywordsScore
-                Float::class.javaPrimitiveType, // keywordsThreshold
-                Int::class.javaPrimitiveType, // numTrailingBlanks
-                String::class.java, // provider
-                Int::class.javaPrimitiveType, // device
-            ).newInstance(
-                tokensPath, encoderPath, decoderPath, joinerPath, keywordsPath,
-                2, 16000.0f, 80, 4, 1.0f, 0.25f, 1, "cpu", 0
+            spotter = createKeywordSpotter(
+                tokensPath, encoderPath, decoderPath, joinerPath, keywordsPath
             )
 
-            keywordSpotter = kwsClass.getConstructor(configClass).newInstance(config)
-            kwsReady = true
-            Log.i(TAG, "KeywordSpotter initialized successfully")
+            if (spotter != null) {
+                // 缓存反射方法
+                val spotterClass = spotter!!.javaClass
+                createStreamMethod = spotterClass.getMethod("createStream")
+                streamClass = createStreamMethod!!.returnType
+                isReadyMethod = spotterClass.getMethod("isReady", streamClass)
+                decodeStreamMethod = spotterClass.getMethod("decodeStream", streamClass)
+                getResultMethod = spotterClass.getMethod("getResult", streamClass)
+                resetStreamMethod = spotterClass.getMethod("resetStream", streamClass)
+                acceptWaveformMethod = streamClass!!.getMethod(
+                    "acceptWaveform", FloatArray::class.java, Float::class.javaPrimitiveType
+                )
 
+                kwsReady = true
+                Log.i(TAG, "KeywordSpotter initialized — ready to listen")
+            }
         } catch (e: ClassNotFoundException) {
-            Log.e(TAG, "sherpa-onnx not found. Add dependency: com.k2fsa.sherpa:onnx:1.10.32")
-            Log.e(TAG, "See README for setup instructions")
+            Log.e(TAG, "sherpa-onnx not found on classpath. Check dependency: com.k2fsa.sherpa:onnx")
         } catch (e: Exception) {
-            Log.e(TAG, "Init failed: ${e.message}", e)
+            Log.e(TAG, "WakeWordManager init failed: ${e.message}", e)
         }
     }
 
     /**
-     * 开始监听麦克风
+     * 创建 KeywordSpotter 实例（通过反射，兼容多个版本的 sherpa-onnx API）
      */
+    private fun createKeywordSpotter(
+        tokens: String, encoder: String, decoder: String,
+        joiner: String, keywords: String
+    ): Any? {
+        return try {
+            // 方式1: 尝试 sherpa-onnx v1.10+ Java API
+            val configClass = Class.forName("com.k2fsa.sherpa.onnx.KeywordSpotterConfig")
+            val config = configClass.newInstance()
+
+            // 尝试通过 setter 或字段设置
+            trySetField(config, "tokens", tokens)
+            trySetField(config, "encoder", encoder)
+            trySetField(config, "decoder", decoder)
+            trySetField(config, "joiner", joiner)
+            trySetField(config, "keywordsFile", keywords)
+            trySetField(config, "numThreads", 2)
+            trySetField(config, "sampleRate", 16000.0f)
+            trySetField(config, "featureDim", 80)
+            trySetField(config, "maxActivePaths", 4)
+            trySetField(config, "keywordsScore", 1.0f)
+            trySetField(config, "keywordsThreshold", 0.25f)
+            trySetField(config, "numTrailingBlanks", 1)
+            trySetField(config, "provider", "cpu")
+            trySetField(config, "device", 0)
+
+            val spotterClass = Class.forName("com.k2fsa.sherpa.onnx.KeywordSpotter")
+            spotterClass.getConstructor(configClass).newInstance(config)
+        } catch (e: Exception) {
+            Log.w(TAG, "KeywordSpotter creation method 1 failed: ${e.message}")
+            try {
+                // 方式2: 直接构造函数传参
+                val spotterClass = Class.forName("com.k2fsa.sherpa.onnx.KeywordSpotter")
+                val ctor = spotterClass.constructors.firstOrNull { it.parameterCount >= 5 }
+                if (ctor != null) {
+                    val params = Array(ctor.parameterCount) { i ->
+                        when (ctor.parameterTypes[i]) {
+                            String::class.java -> when (i) {
+                                0 -> tokens; 1 -> encoder; 2 -> decoder
+                                3 -> joiner; 4 -> keywords; else -> ""
+                            }
+                            Int::class.javaPrimitiveType -> 2
+                            Float::class.javaPrimitiveType -> 16000.0f
+                            else -> 0
+                        }
+                    }
+                    ctor.newInstance(*params)
+                } else {
+                    Log.e(TAG, "No suitable KeywordSpotter constructor found")
+                    null
+                }
+            } catch (e2: Exception) {
+                Log.e(TAG, "All creation methods failed: ${e2.message}")
+                null
+            }
+        }
+    }
+
+    private fun trySetField(obj: Any, fieldName: String, value: Any) {
+        try {
+            val field = obj.javaClass.getDeclaredField(fieldName)
+            field.isAccessible = true
+            field.set(obj, value)
+        } catch (e: NoSuchFieldException) {
+            // 尝试 setter 方法
+            try {
+                val setter = obj.javaClass.getMethod(
+                    "set${fieldName.replaceFirstChar { it.uppercase() }}",
+                    value.javaClass
+                )
+                setter.invoke(obj, value)
+            } catch (_: Exception) {}
+        } catch (_: Exception) {}
+    }
+
     fun start() {
         if (!kwsReady) {
-            Log.w(TAG, "KWS not ready, cannot start")
+            Log.w(TAG, "KWS not ready")
             return
         }
-
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED) {
-            Log.w(TAG, "RECORD_AUDIO permission not granted")
+            Log.w(TAG, "RECORD_AUDIO not granted")
             return
         }
-
         if (running.get()) return
         running.set(true)
 
@@ -177,80 +244,56 @@ class WakeWordManager(
         }
 
         audioRecord?.startRecording()
-        Log.i(TAG, "Listening for wake words: 哈德 / 你好小哈 / 小哈 / 哈德哈德")
+        Log.i(TAG, "Listening: 哈德 / 你好小哈 / 小哈 / 哈德哈德")
 
-        listenThread = Thread {
-            listenLoop()
-        }.apply {
+        listenThread = Thread { listenLoop() }.apply {
             name = "WakeWordThread"
             isDaemon = true
             start()
         }
     }
 
-    /**
-     * 停止监听
-     */
     fun stop() {
         running.set(false)
         listenThread?.interrupt()
         listenThread = null
-
-        try {
-            audioRecord?.stop()
-            audioRecord?.release()
-        } catch (_: Exception) {}
+        try { audioRecord?.stop() } catch (_: Exception) {}
+        try { audioRecord?.release() } catch (_: Exception) {}
         audioRecord = null
-
-        Log.i(TAG, "Stopped listening")
+        Log.i(TAG, "Stopped")
     }
 
-    /**
-     * 释放所有资源
-     */
     fun release() {
         stop()
-        keywordSpotter = null
+        spotter = null
         kwsReady = false
     }
 
+    fun isReady(): Boolean = kwsReady
+
     private fun listenLoop() {
-        val chunkSamples = 1600 // 100ms at 16kHz
+        val chunkSamples = 1600 // 100ms
         val buffer = ShortArray(chunkSamples)
 
         try {
-            // 创建 stream
-            val kwsClass = Class.forName("com.k2fsa.sherpa.onnx.KeywordSpotter")
-            val createStreamMethod = kwsClass.getMethod("createStream")
-            val isReadyMethod = kwsClass.getMethod("isReady", createStreamMethod.returnType)
-            val decodeMethod = kwsClass.getMethod("decodeStream", createStreamMethod.returnType)
-            val getResultMethod = kwsClass.getMethod("getResult", createStreamMethod.returnType)
-            val resetMethod = kwsClass.getMethod("resetStream", createStreamMethod.returnType)
-            val acceptWaveformMethod = createStreamMethod.returnType.getMethod(
-                "acceptWaveform",
-                FloatArray::class.java,
-                Float::class.javaPrimitiveType
-            )
-
-            stream = createStreamMethod.invoke(keywordSpotter)
+            kwsStream = createStreamMethod?.invoke(spotter)
 
             while (running.get()) {
                 val readCount = audioRecord?.read(buffer, 0, chunkSamples) ?: 0
                 if (readCount <= 0) continue
 
-                // Short[] -> Float[] (归一化到 -1.0 ~ 1.0)
-                val floatBuffer = FloatArray(readCount)
+                val floatBuf = FloatArray(readCount)
                 for (i in 0 until readCount) {
-                    floatBuffer[i] = buffer[i].toFloat() / 32768.0f
+                    floatBuf[i] = buffer[i].toFloat() / 32768.0f
                 }
 
-                acceptWaveformMethod.invoke(stream, floatBuffer, SAMPLE_RATE.toFloat())
+                acceptWaveformMethod?.invoke(kwsStream, floatBuf, SAMPLE_RATE.toFloat())
 
-                while (isReadyMethod.invoke(keywordSpotter, stream) as Boolean) {
-                    decodeMethod.invoke(keywordSpotter, stream)
-                    val result = getResultMethod.invoke(keywordSpotter, stream) as String
+                while (isReadyMethod?.invoke(spotter, kwsStream) == true) {
+                    decodeStreamMethod?.invoke(spotter, kwsStream)
+                    val result = getResultMethod?.invoke(spotter, kwsStream) as? String ?: ""
                     if (result.isNotBlank()) {
-                        resetMethod.invoke(keywordSpotter, stream)
+                        resetStreamMethod?.invoke(spotter, kwsStream)
                         val keyword = result.trim()
                         Log.i(TAG, "[WAKE] $keyword")
                         onWake(keyword)
@@ -258,14 +301,9 @@ class WakeWordManager(
                 }
             }
         } catch (e: InterruptedException) {
-            Log.i(TAG, "Listen thread interrupted")
+            // Normal stop
         } catch (e: Exception) {
-            Log.e(TAG, "Listen loop error: ${e.message}", e)
+            Log.e(TAG, "Listen error: ${e.message}", e)
         }
     }
-
-    /**
-     * 检查模型是否就绪
-     */
-    fun isReady(): Boolean = kwsReady
 }
