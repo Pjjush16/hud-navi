@@ -11,8 +11,8 @@ android {
         applicationId = "com.hud.navi"
         minSdk = 21
         targetSdk = 34
-        versionCode = 54
-        versionName = "10.3"
+        versionCode = 55
+        versionName = "10.4"
     }
 
     signingConfigs {

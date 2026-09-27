@@ -113,8 +113,13 @@ class WakeWordManager(
             if (spotter != null) {
                 // 缓存反射方法
                 val spotterClass = spotter!!.javaClass
+                Log.i(TAG, "Spotter class: ${spotterClass.name}")
+                Log.i(TAG, "Spotter methods: ${spotterClass.methods.map { "${it.name}(${it.parameterTypes.joinToString { it.simpleName }})" }.take(20)}")
+
                 createStreamMethod = spotterClass.getMethod("createStream")
                 streamClass = createStreamMethod!!.returnType
+                Log.i(TAG, "Stream class: ${streamClass!!.name}")
+
                 isReadyMethod = spotterClass.getMethod("isReady", streamClass)
                 decodeStreamMethod = spotterClass.getMethod("decodeStream", streamClass)
                 getResultMethod = spotterClass.getMethod("getResult", streamClass)
@@ -124,7 +129,9 @@ class WakeWordManager(
                 )
 
                 kwsReady = true
-                Log.i(TAG, "KeywordSpotter initialized — ready to listen")
+                Log.i(TAG, "KeywordSpotter initialized — all 7 methods cached, ready to listen")
+            } else {
+                Log.e(TAG, "Spotter is null — KWS will not work")
             }
         } catch (e: ClassNotFoundException) {
             Log.e(TAG, "sherpa-onnx not found on classpath. Check dependency: com.k2fsa.sherpa:onnx")
@@ -274,14 +281,18 @@ class WakeWordManager(
     private fun listenLoop() {
         val chunkSamples = 1600 // 100ms
         val buffer = ShortArray(chunkSamples)
+        var chunkCount = 0L
+        var lastLogTime = System.currentTimeMillis()
 
         try {
             kwsStream = createStreamMethod?.invoke(spotter)
+            Log.i(TAG, "Listen loop started, stream created")
 
             while (running.get()) {
                 val readCount = audioRecord?.read(buffer, 0, chunkSamples) ?: 0
                 if (readCount <= 0) continue
 
+                chunkCount++
                 val floatBuf = FloatArray(readCount)
                 for (i in 0 until readCount) {
                     floatBuf[i] = buffer[i].toFloat() / 32768.0f
@@ -299,11 +310,19 @@ class WakeWordManager(
                         onWake(keyword)
                     }
                 }
+
+                // 每5秒打印一次心跳日志
+                val now = System.currentTimeMillis()
+                if (now - lastLogTime > 5000) {
+                    Log.i(TAG, "Heartbeat: $chunkCount chunks processed, running=${running.get()}")
+                    lastLogTime = now
+                }
             }
+            Log.i(TAG, "Listen loop exited normally, total chunks: $chunkCount")
         } catch (e: InterruptedException) {
-            // Normal stop
+            Log.i(TAG, "Listen loop interrupted (normal stop)")
         } catch (e: Exception) {
-            Log.e(TAG, "Listen error: ${e.message}", e)
+            Log.e(TAG, "Listen error: ${e.javaClass.simpleName}: ${e.message}", e)
         }
     }
 }

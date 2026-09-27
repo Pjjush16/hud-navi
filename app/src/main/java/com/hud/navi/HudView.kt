@@ -158,33 +158,9 @@ class HudView @JvmOverloads constructor(
         drawRoadNetwork(canvas, w, h, metersPerPixel)
         drawVehicleMarker(canvas, w, h)
 
-        // 渐变遮罩：视觉底部 28% 区域做 BLACK→TRANSPARENT 渐变，其余透明
-        val fadeHeight = h * 0.28f
-        val fadeShader = if (mirrorEnabled) {
-            // 镜像翻转后 canvas y=h = 视觉底部
-            // y=h BLACK → y=h-fadeHeight TRANSPARENT
-            // CLAMP y<h-fadeHeight → TRANSPARENT（路网区域全透明）
-            LinearGradient(0f, h, 0f, h - fadeHeight,
-                Color.BLACK, Color.TRANSPARENT, Shader.TileMode.CLAMP)
-        } else {
-            // 非镜像：canvas y=0 = 视觉顶部
-            // y=0 BLACK → y=fadeHeight TRANSPARENT
-            // CLAMP y>fadeHeight → TRANSPARENT（路网区域全透明）
-            LinearGradient(0f, 0f, 0f, fadeHeight,
-                Color.BLACK, Color.TRANSPARENT, Shader.TileMode.CLAMP)
-        }
-        topFadePaint.shader = fadeShader
-        canvas.drawRect(0f, 0f, w, h, topFadePaint)
-
-        // 速度显示（在镜像块内部，随镜像翻转）
-        drawSpeedometer(canvas, w, h)
-
         if (mirrorEnabled) {
             canvas.restore()
         }
-
-        // OSM 归属标注（ODbL 协议要求，始终在视觉底部）
-        drawAttribution(canvas, w, h)
     }
 
     private fun drawAttribution(canvas: Canvas, w: Float, h: Float) {
@@ -251,17 +227,9 @@ class HudView @JvmOverloads constructor(
         val cx = w / 2f
         val cy = h * 0.55f
 
-        // 车标颜色随速度变化：绿→黄→红
-        val speedColor = getSpeedColor(vehicleSpeed)
-        vehicleFillPaint.color = speedColor
-        vehicleStrokePaint.color = speedColor
-
-        if (isSnapped) {
-            // 吸附光晕也用速度色
-            snapGlowPaint.color = Color.argb(0x33,
-                Color.red(speedColor), Color.green(speedColor), Color.blue(speedColor))
-            canvas.drawCircle(cx, cy, 30f, snapGlowPaint)
-        }
+        // 车标固定白色
+        vehicleFillPaint.color = Color.WHITE
+        vehicleStrokePaint.color = Color.WHITE
 
         val size = 28f
         val tipY = cy - size * 1.4f

@@ -393,8 +393,10 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             if (wakeWordManager?.isReady() == true) {
                 wakeWordEnabled = true
                 Log.i(TAG, "Wake word engine ready")
+                Toast.makeText(this, "语音唤醒已就绪：哈德/小哈", Toast.LENGTH_SHORT).show()
             } else {
                 Log.w(TAG, "Wake word engine not ready (model files missing)")
+                Toast.makeText(this, "语音唤醒未就绪（模型缺失）", Toast.LENGTH_LONG).show()
             }
         } catch (e: Exception) {
             Log.w(TAG, "Wake word init failed: ${e.message}")
