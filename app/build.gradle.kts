@@ -44,4 +44,7 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+
+    // sherpa-onnx: 离线关键词识别（中文唤醒词）
+    implementation("com.k2fsa.sherpa:onnx:1.10.32")
 }

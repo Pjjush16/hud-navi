@@ -82,6 +82,10 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     // === 双击手势（切换镜像） ===
     private lateinit var gestureDetector: GestureDetector
 
+    // === 语音唤醒词 ===
+    private var wakeWordManager: WakeWordManager? = null
+    private var wakeWordEnabled = false
+
     // === GPS 目标 ===
     private var targetLat = 0.0; private var targetLng = 0.0
     private var targetBearing = 0f; private var targetSpeed = 0f
@@ -360,7 +364,33 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         }
 
         startHudForegroundService()
+
+        // 初始化语音唤醒词识别
+        initWakeWord()
+
         requestPermissions()
+    }
+
+    private fun initWakeWord() {
+        try {
+            wakeWordManager = WakeWordManager(this) { keyword ->
+                Log.i(TAG, "Wake word detected: $keyword")
+                // 唤醒后的回调 — 目前先 Toast 提示，后续接入语音指令识别
+                handler.post {
+                    Toast.makeText(this, "已唤醒: $keyword", Toast.LENGTH_SHORT).show()
+                    hudView.statusText = "语音已唤醒: $keyword"
+                }
+            }
+            wakeWordManager?.init()
+            if (wakeWordManager?.isReady() == true) {
+                wakeWordEnabled = true
+                Log.i(TAG, "Wake word engine ready")
+            } else {
+                Log.w(TAG, "Wake word engine not ready (model files missing)")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Wake word init failed: ${e.message}")
+        }
     }
 
     private fun startHudForegroundService() {
@@ -373,12 +403,18 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     }
 
     private fun requestPermissions() {
-        val perms = arrayOf(
+        val perms = mutableListOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
             Manifest.permission.ACCESS_COARSE_LOCATION
         )
-        if (perms.any { ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }) {
-            ActivityCompat.requestPermissions(this, perms, PERM_REQUEST)
+        // 语音唤醒需要录音权限
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            // Android 12 以下 RECORD_AUDIO 是普通权限
+        }
+        perms.add(Manifest.permission.RECORD_AUDIO)
+        val permArray = perms.toTypedArray()
+        if (permArray.any { ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }) {
+            ActivityCompat.requestPermissions(this, permArray, PERM_REQUEST)
         } else {
             startLocationUpdates()
         }
@@ -764,10 +800,26 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private fun startRenderLoop() { if (!renderRunning) { renderRunning = true; handler.post(renderRunnable) } }
     private fun stopRenderLoop() { renderRunning = false; handler.removeCallbacks(renderRunnable) }
 
-    override fun onResume() { super.onResume(); startRenderLoop(); startHudForegroundService() }
-    override fun onPause() { stopRenderLoop(); super.onPause() }
+    override fun onResume() {
+        super.onResume()
+        startRenderLoop()
+        startHudForegroundService()
+        // 启动唤醒词监听（需要 RECORD_AUDIO 权限）
+        if (wakeWordEnabled && ContextCompat.checkSelfPermission(this,
+                Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            wakeWordManager?.start()
+        }
+    }
+
+    override fun onPause() {
+        stopRenderLoop()
+        wakeWordManager?.stop()
+        super.onPause()
+    }
+
     override fun onDestroy() {
         stopRenderLoop()
+        wakeWordManager?.release()
         locationManager.removeUpdates(this)
         sensorManager.unregisterListener(this)
         handler.removeCallbacksAndMessages(null)
