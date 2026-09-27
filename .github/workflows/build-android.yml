@@ -35,28 +35,12 @@ jobs:
           mkdir -p app/libs
           mkdir -p app/src/main/jniLibs
           
-          # Download AAR — 提取 classes.jar + 两个架构的 native libs
+          # Download AAR — 直接使用完整 AAR 文件
           AAR_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/v${SHERPA_VERSION}/sherpa-onnx-${SHERPA_VERSION}.aar"
           echo "Downloading AAR: $AAR_URL"
-          if wget -q "$AAR_URL" -O /tmp/sherpa-onnx.aar 2>&1; then
-            echo "AAR downloaded: $(stat -c%s /tmp/sherpa-onnx.aar) bytes"
-            cd /tmp
-            mkdir -p aar_extract
-            unzip -o sherpa-onnx.aar -d aar_extract/ > /dev/null 2>&1
-            # 提取 classes.jar（Java API）
-            cp aar_extract/classes.jar ${{ github.workspace }}/app/libs/sherpa-onnx-classes.jar 2>/dev/null || true
-            # 提取两个架构的 native libs
-            for abi in arm64-v8a armeabi-v7a; do
-              mkdir -p ${{ github.workspace }}/app/src/main/jniLibs/$abi
-              if [ -d "aar_extract/jni/$abi" ]; then
-                cp aar_extract/jni/$abi/*.so \
-                   ${{ github.workspace }}/app/src/main/jniLibs/$abi/ 2>/dev/null || true
-                echo "$abi native libs installed: $(ls ${{ github.workspace }}/app/src/main/jniLibs/$abi/ 2>/dev/null | wc -l) files"
-              fi
-            done
-            cd ${{ github.workspace }}
-            echo "Classes jar:"
-            ls -lh app/libs/ 2>/dev/null || echo "(empty)"
+          if wget -q "$AAR_URL" -O app/libs/sherpa-onnx.aar 2>&1; then
+            echo "AAR downloaded: $(stat -c%s app/libs/sherpa-onnx.aar) bytes"
+            ls -lh app/libs/sherpa-onnx.aar
           else
             echo "WARNING: AAR download failed"
           fi
