@@ -239,57 +239,45 @@ class HudView @JvmOverloads constructor(
         val cx = w / 2f
         val cy = h * 0.55f
 
-        // 放大燕尾箭头（v10.15 修复方向：朝上指 + 蓝色底白边圆圈）
+        // v10.16: 蓝色实心圆 + 白色描边 + 白色4点 chevron 箭头
         val size = 48f
+        val circleRadius = size * 1.2f
 
-        // === 外层：蓝色底 + 实心白边圆圈 ===
-        val circleRadius = size * 1.3f
-
-        // 白色外圈（先画大一点的白色实心圆作为边框）
+        // === 白色描边圆（外层） ===
         val whiteBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
             style = Paint.Style.FILL
         }
         canvas.drawCircle(cx, cy, circleRadius + 3f, whiteBorderPaint)
 
-        // 蓝色实心圆（覆盖在白色圆上面，留出白色边缘）
+        // === 蓝色实心圆（内层） ===
         val blueFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.parseColor("#2196F3")
             style = Paint.Style.FILL
         }
         canvas.drawCircle(cx, cy, circleRadius, blueFillPaint)
 
-        // === 燕尾箭头（朝上指） ===
+        // === 白色4点 chevron 箭头（大三角挖掉底部小三角） ===
         val arrowFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
             style = Paint.Style.FILL
         }
-        val arrowStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            style = Paint.Style.STROKE
-            strokeWidth = 2.5f
-            strokeJoin = Paint.Join.ROUND
+
+        // 4个顶点：顶、左肩、底部凹口、右肩
+        val tipY = cy - size * 0.65f          // 1. 顶部尖端
+        val shoulderY = cy + size * 0.5f      // 2 & 4. 左右肩（底部最宽处）
+        val indentY = cy + size * 0.05f       // 3. 底部凹口点（小三角形被挖掉）
+        val halfW = size * 0.5f               // 左右肩的半宽
+
+        val chevronPath = Path().apply {
+            moveTo(cx, tipY)                   // → 顶
+            lineTo(cx - halfW, shoulderY)      // → 左肩
+            lineTo(cx, indentY)                // → 底部凹口（挖掉小三角）
+            lineTo(cx + halfW, shoulderY)      // → 右肩
+            close()                            // → 回到顶
         }
 
-        // 朝上指：tip 在最上面，shoulder 在中间，indent+tail 在下面
-        val tipY = cy - size * 1.4f       // 箭头尖端（最上面）
-        val shoulderY = cy - size * 0.3f // 肩膀（中间偏上）
-        val indentY = cy + size * 0.2f   // 凹口（中间）
-        val tailY = cy + size * 0.6f     // 燕尾末端（最下面）
-        val halfW = size * 0.55f
-
-        val dartPath = Path().apply {
-            moveTo(cx, tipY)                   // 顶部尖端
-            lineTo(cx - halfW, shoulderY)      // 左肩
-            lineTo(cx - halfW * 0.4f, tailY)   // 左燕尾
-            lineTo(cx, indentY)                // 凹口（中间）
-            lineTo(cx + halfW * 0.4f, tailY)   // 右燕尾
-            lineTo(cx + halfW, shoulderY)      // 右肩
-            close()
-        }
-
-        canvas.drawPath(dartPath, arrowFillPaint)
-        canvas.drawPath(dartPath, arrowStrokePaint)
+        canvas.drawPath(chevronPath, arrowFillPaint)
     }
 
     private fun drawSpeedometer(canvas: Canvas, w: Float, h: Float) {
