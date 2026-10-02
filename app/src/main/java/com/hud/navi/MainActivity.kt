@@ -352,7 +352,8 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         if (diskSegments.isNotEmpty()) {
             hudView.setRoads(diskSegments, 0.0, 0.0)
             intersections = buildIntersections(diskSegments)
-            Log.i(TAG, "Loaded ${diskSegments.size} cached segments at startup")
+            RoadFetcher.markRendered()
+            Log.i(TAG, "Loaded ${diskSegments.size} cached segments at startup (marked as rendered)")
         }
 
         // 双击切换镜像
@@ -537,10 +538,16 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
             roadFetchJob?.cancel()
             roadFetchJob = scope.launch {
-                val segments = RoadFetcher.fetchRoads(targetLat, targetLng)
-                hudView.setRoads(segments, targetLat, targetLng)
-                intersections = buildIntersections(segments)
-                Log.i(TAG, "Roads: ${segments.size} segments, ${intersections.size} intersections")
+                val result = RoadFetcher.fetchRoads(targetLat, targetLng)
+                // 只有数据变了才重绘，避免无谓的屏幕刷新
+                if (result.needRerender) {
+                    hudView.setRoads(result.segments, targetLat, targetLng)
+                    intersections = buildIntersections(result.segments)
+                    RoadFetcher.markRendered()
+                    Log.i(TAG, "Roads updated: ${result.segments.size} segments, ${intersections.size} intersections (data changed)")
+                } else {
+                    Log.i(TAG, "Roads unchanged (hash match), skip rerender")
+                }
             }
         }
     }

@@ -25,7 +25,13 @@ import android.view.View
 import kotlin.math.*
 
 /**
- * hud-navi v10.21 — 预渲染修复 + 路网缓存扩大
+ * hud-navi v10.22 — 本地缓存优先 + 哈希比对智能重绘
+ *
+ * v10.22 变更：
+ * - 磁盘缓存永不过期，启动时优先显示本地缓存路网
+ * - 网络请求后 SHA-256 哈希比对，数据相同不重绘
+ * - FetchResult 返回 needRerender 标志，避免无谓刷新
+ * - 启动时加载磁盘缓存后标记已渲染
  *
  * v10.21 变更：
  * - 修复 setRoads 从 IO 线程调用 invalidate() 导致路网加载后不渲染（改用 postInvalidate()）

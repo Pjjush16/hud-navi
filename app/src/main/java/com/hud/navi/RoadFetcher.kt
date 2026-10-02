@@ -32,6 +32,7 @@ import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.security.MessageDigest
 import kotlin.math.*
 
 /**
@@ -55,7 +56,14 @@ object RoadFetcher {
     // === 磁盘缓存 ===
     private var cacheDir: File? = null
     private const val CACHE_FILE = "road_cache.json"
-    private const val CACHE_MAX_AGE_MS = 30 * 60 * 1000L  // 30 分钟
+    private const val CACHE_HASH_FILE = "road_cache.hash"
+    // 磁盘缓存永不过期（启动时优先显示本地缓存，再异步请求服务器）
+    // 只有当服务器返回的数据哈希不同时才重绘
+
+    // 当前缓存的数据哈希
+    private var currentHash: String = ""
+    // 上次实际渲染到屏幕上的数据哈希（用于判断是否需要重绘）
+    private var lastRenderedHash: String = ""
 
     data class RoadSegment(
         val type: RoadType,
@@ -96,22 +104,26 @@ object RoadFetcher {
 
     /**
      * 从磁盘加载缓存（启动时调用，秒加载）
+     * 不再检查过期时间 — 本地缓存永久有效，优先显示
      */
     fun loadDiskCache(): List<RoadSegment> {
         val dir = cacheDir ?: return emptyList()
         val file = File(dir, CACHE_FILE)
         if (!file.exists()) return emptyList()
 
-        val age = System.currentTimeMillis() - file.lastModified()
-        if (age > CACHE_MAX_AGE_MS) {
-            Log.i(TAG, "Disk cache expired (${age / 1000}s old)")
-            return emptyList()
+        // 加载保存的哈希
+        val hashFile = File(dir, CACHE_HASH_FILE)
+        if (hashFile.exists()) {
+            currentHash = hashFile.readText().trim()
         }
 
         return try {
             val json = file.readText()
             val segments = deserializeSegments(json)
-            Log.i(TAG, "Loaded ${segments.size} segments from disk cache (${age / 1000}s old)")
+            if (currentHash.isEmpty()) {
+                currentHash = computeHash(segments)
+            }
+            Log.i(TAG, "Loaded ${segments.size} segments from disk cache (hash: ${currentHash.take(8)})")
             segments
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load disk cache: ${e.message}")
@@ -120,7 +132,7 @@ object RoadFetcher {
     }
 
     /**
-     * 保存缓存到磁盘
+     * 保存缓存到磁盘（同时保存哈希用于下次比对）
      */
     private fun saveDiskCache(segments: List<RoadSegment>, lat: Double, lng: Double) {
         val dir = cacheDir ?: return
@@ -128,10 +140,30 @@ object RoadFetcher {
         try {
             val json = serializeSegments(segments, lat, lng)
             file.writeText(json)
-            Log.i(TAG, "Saved ${segments.size} segments to disk cache")
+            // 保存哈希
+            val hash = computeHash(segments)
+            currentHash = hash
+            File(dir, CACHE_HASH_FILE).writeText(hash)
+            Log.i(TAG, "Saved ${segments.size} segments to disk cache (hash: ${hash.take(8)})")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to save disk cache: ${e.message}")
         }
+    }
+
+    /**
+     * 计算路网数据的 SHA-256 哈希
+     */
+    private fun computeHash(segments: List<RoadSegment>): String {
+        val md = MessageDigest.getInstance("SHA-256")
+        for (seg in segments) {
+            md.update(seg.type.name.toByteArray())
+            for ((lat, lng) in seg.points) {
+                // 用 Int 近似（小数点后5位），避免浮点精度差异
+                md.update(((lat * 100000).toLong()).toByteArray())
+                md.update(((lng * 100000).toLong()).toByteArray())
+            }
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
     }
 
     private fun serializeSegments(segments: List<RoadSegment>, lat: Double, lng: Double): String {
@@ -186,40 +218,72 @@ object RoadFetcher {
 
     /**
      * 获取路网数据（内存缓存 + 磁盘缓存 + 网络）
+     * 
+     * 返回 FetchResult，包含数据和是否需要重绘的标志：
+     * - 网络请求失败 → 返回缓存，needRerender=false
+     * - 网络成功但哈希一致 → 返回缓存，needRerender=false  
+     * - 网络成功且哈希不同 → 返回新数据，needRerender=true
      */
-    suspend fun fetchRoads(lat: Double, lng: Double): List<RoadSegment> = withContext(Dispatchers.IO) {
+    data class FetchResult(
+        val segments: List<RoadSegment>,
+        val needRerender: Boolean
+    )
+
+    suspend fun fetchRoads(lat: Double, lng: Double): FetchResult = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
         val dist = haversine(lat, lng, cacheCenterLat, cacheCenterLng)
 
-        // 内存缓存命中
+        // 内存缓存命中（短时间内距离很近，不需要重新请求）
         if (cachedSegments.isNotEmpty() && dist < 200.0 && (now - lastFetchTime) < 15000) {
-            return@withContext cachedSegments
+            return@withContext FetchResult(cachedSegments, false)
         }
 
         // 限流
         if (now - lastFetchTime < MIN_INTERVAL_MS) {
-            return@withContext cachedSegments
+            return@withContext FetchResult(cachedSegments, false)
         }
 
         try {
             val query = buildQuery(lat, lng)
             val result = httpPost(OVERPASS_URL, "data=${URLEncoder.encode(query, "UTF-8")}")
-            val segments = parseOverpassResponse(result)
+            val newSegments = parseOverpassResponse(result)
+            val newHash = computeHash(newSegments)
 
-            cachedSegments = segments
+            // 哈希比对：数据一样就不需要重绘
+            if (newHash == currentHash && cachedSegments.isNotEmpty()) {
+                Log.i(TAG, "Server data unchanged (hash: ${newHash.take(8)}), skip rerender")
+                lastFetchTime = now
+                return@withContext FetchResult(cachedSegments, false)
+            }
+
+            // 数据变了，更新缓存并标记需要重绘
+            cachedSegments = newSegments
             cacheCenterLat = lat
             cacheCenterLng = lng
             lastFetchTime = now
+            saveDiskCache(newSegments, lat, lng)
 
-            // 保存到磁盘
-            saveDiskCache(segments, lat, lng)
-
-            Log.i(TAG, "Fetched ${segments.size} road segments")
-            segments
+            Log.i(TAG, "Fetched ${newSegments.size} segments (hash changed: ${currentHash.take(8)} → ${newHash.take(8)})")
+            FetchResult(newSegments, true)
         } catch (e: Exception) {
             Log.e(TAG, "Overpass fetch failed: ${e.message}")
-            cachedSegments
+            // 请求失败，返回缓存数据，不需要重绘（已经在显示了）
+            FetchResult(cachedSegments, false)
         }
+    }
+
+    /**
+     * 标记当前缓存数据已渲染到屏幕
+     */
+    fun markRendered() {
+        lastRenderedHash = currentHash
+    }
+
+    /**
+     * 检查当前缓存是否与上次渲染的数据不同
+     */
+    fun needsRerender(): Boolean {
+        return currentHash != lastRenderedHash && cachedSegments.isNotEmpty()
     }
 
     private fun buildQuery(lat: Double, lng: Double): String {
