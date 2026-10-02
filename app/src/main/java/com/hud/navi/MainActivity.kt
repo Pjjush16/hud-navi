@@ -161,8 +161,8 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         private const val PERM_REQUEST = 100
         private const val TAG = "HudNavi"
         // v10.11: 地图刷新优化 — 距离阈值降低，间隔增大，减少频繁刷新
-        private const val ROAD_FETCH_DIST = 500.0
-        private const val ROAD_FETCH_INTERVAL = 20000L
+        private const val ROAD_FETCH_DIST = 300.0
+        private const val ROAD_FETCH_INTERVAL = 15000L
         private const val COMPASS_EMA_ALPHA = 0.08f
         private const val HEADING_DEAD_ZONE = 2.5f
         private const val FREEZE_ACC_THRESHOLD = 0.5f
@@ -554,8 +554,12 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
         detectIntersection()
 
-        // === v10.11: 传递吸附状态给 EKF（惯导仅吸附时激活）===
-        val prevSnapped = ekf.snappedToRoad
+        // === v10.20: 传递罗盘数据给 EKF ===
+        if (hasRotationVector && rvInitialized) {
+            ekf.updateCompass(rvHeadingSmooth)
+        } else if (compassInitialized) {
+            ekf.updateCompass(compassBearing)
+        }
 
         ekf.predict(dt, vehicleBearing, targetSpeed * 1000f / 3600f)
         vehicleLat = ekf.lat; vehicleLng = ekf.lng
@@ -608,21 +612,20 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             snapped = hmmMapMatchWithSigma(vehicleLat, vehicleLng, targetSpeed, vehicleBearing, adaptiveSigma)
         }
 
-        // === v10.11: 将吸附状态传递给 EKF 惯导引擎 ===
+        // === v10.20: 路网吸附仅作为微调注入 EKF（不再控制惯导激活） ===
         if (snapped != null && hmmConfidence > HMM_MIN_CONFIDENCE) {
             ekf.snappedToRoad = true
             // 计算吸附路段走向
             if (matchedSegIdx >= 0 && matchedSegIdx < hudView.roadSegments.size) {
                 val seg = hudView.roadSegments[matchedSegIdx]
                 if (seg.points.size >= 2) {
-                    // 找到最近的路段点对，计算走向
                     val midIdx = seg.points.size / 2
                     val (p1Lat, p1Lng) = seg.points[maxOf(0, midIdx - 1)]
                     val (p2Lat, p2Lng) = seg.points[minOf(seg.points.size - 1, midIdx)]
                     ekf.roadHeadingDeg = bearingBetween(p1Lat, p1Lng, p2Lat, p2Lng).toDouble()
                 }
             }
-            // 路网约束伪观测：将吸附位置注入 EKF 修正惯导漂移
+            // 路网约束微调（修正 IMU 累积漂移）
             if (hmmConfidence > 0.3) {
                 ekf.roadConstrainedUpdate(
                     snapped.first, snapped.second,
@@ -635,14 +638,13 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             ekf.snapConfidence = 0.0
         }
 
-        // === 平滑绘制位置：消除吸附/脱吸附抖动 ===
-        // 吸附时快速融入(snapAlphaUp=0.3，~3帧达到95%)
-        // 脱吸附时缓慢退出(snapAlphaDown=0.02，~50帧≈0.8s归零)
+        // === v10.20: 平滑绘制位置（更保守的吸附混合，减少跳变） ===
         if (!snapInit) {
             smoothDrawLat = vehicleLat; smoothDrawLng = vehicleLng; snapInit = true
         }
-        val snapAlphaUp = 0.3
-        val snapAlphaDown = 0.02
+        // v10.20: 更慢的融入/退出速度，避免突然跳变
+        val snapAlphaUp = 0.15    // 吸附融入更慢（~7帧达到95%，约0.12秒）
+        val snapAlphaDown = 0.08  // 退出更平滑（~12帧归零，约0.2秒）
 
         if (snapped != null) {
             snapBlend = (snapBlend + snapAlphaUp).coerceAtMost(1.0)
