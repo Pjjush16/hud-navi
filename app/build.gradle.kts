@@ -11,8 +11,8 @@ android {
         applicationId = "com.hud.navi"
         minSdk = 21
         targetSdk = 34
-        versionCode = 69
-        versionName = "10.18"
+        versionCode = 70
+        versionName = "10.19"
     }
 
     // ABI 分包：输出 arm64-v8a / armeabi-v7a / universal 三个 APK
@@ -39,7 +39,8 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("release")
+            // Signing done externally via zipalign + apksigner in CI
+            // signingConfig = signingConfigs.getByName("release")
         }
     }
     compileOptions {

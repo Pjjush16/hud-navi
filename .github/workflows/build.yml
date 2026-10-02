@@ -98,8 +98,53 @@ jobs:
       - name: Build Debug APK
         run: ./gradlew assembleDebug
 
-      - name: Build Release APK
-        run: ./gradlew assembleRelease
+      - name: Build unsigned Release APK
+        run: ./gradlew assembleRelease -Pandroid.injected.signing=false || ./gradlew assembleRelease
+
+      - name: zipalign + sign Release APK
+        run: |
+          echo "=== zipalign ==="
+          ZIPALIGN=$(find $ANDROID_HOME/build-tools -name zipalign | sort -V | tail -1)
+          APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -1)
+          echo "zipalign: $ZIPALIGN"
+          echo "apksigner: $APKSIGNER"
+          
+          mkdir -p app/build/outputs/apk/release-aligned
+          
+          for apk in app/build/outputs/apk/release/*-release-unsigned.apk app/build/outputs/apk/release/*-release.apk; do
+            [ -f "$apk" ] || continue
+            base=$(basename "$apk" .apk)
+            # Remove signing suffix if present
+            base=$(echo "$base" | sed 's/-release-unsigned/-release/' | sed 's/-release/-release/')
+            aligned="app/build/outputs/apk/release-aligned/${base}-aligned.apk"
+            signed="app/build/outputs/apk/release-aligned/${base}.apk"
+            
+            echo "Processing: $apk"
+            
+            # Step 1: zipalign (MUST be before signing)
+            $ZIPALIGN -f -v 4 "$apk" "$aligned" 2>&1 | tail -1
+            
+            # Step 2: sign with apksigner (V1 + V2)
+            $APKSIGNER sign \
+              --ks keystore/hud-navi-release.jks \
+              --ks-key-alias hud-navi \
+              --ks-pass pass:hudnavi2026release \
+              --key-pass pass:hudnavi2026release \
+              --v1-signing-enabled true \
+              --v2-signing-enabled true \
+              --out "$signed" \
+              "$aligned"
+            
+            # Step 3: verify
+            echo "Verifying $signed..."
+            $APKSIGNER verify --verbose --print-certs "$signed" 2>&1 | head -10
+            
+            # Clean up aligned temp file
+            rm -f "$aligned"
+          done
+          
+          echo "=== Final signed APKs ==="
+          ls -la app/build/outputs/apk/release-aligned/
 
       - name: Get version name
         id: version
@@ -117,7 +162,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: hud-navi-release
-          path: app/build/outputs/apk/release/*.apk
+          path: app/build/outputs/apk/release-aligned/*.apk
 
       - name: Create GitHub Release
         if: github.ref == 'refs/heads/main' && github.event_name == 'push' || github.event_name == 'workflow_dispatch'
@@ -138,7 +183,7 @@ jobs:
             
             Commit: `${{ github.sha }}`
           files: |
-            app/build/outputs/apk/release/*.apk
+            app/build/outputs/apk/release-aligned/*.apk
             app/build/outputs/apk/debug/*.apk
           draft: false
           prerelease: false
