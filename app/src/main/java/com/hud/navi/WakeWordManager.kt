@@ -1,7 +1,7 @@
 /*
  * WakeWordManager.kt - 语音唤醒词识别管理器 (v10.17)
  *
- * 基于 sherpa-onnx KeywordSpotter 官方 Java API（非反射），完全离线。
+ * 基于 sherpa-onnx 官方 Android Kotlin API（data class 直接构造，非反射，非 Builder）。
  * 支持中文唤醒词：哈德 / 你好小哈 / 小哈 / 哈德哈德
  *
  * 模型: sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile
@@ -93,46 +93,39 @@ class WakeWordManager(
 
             Log.i(TAG, "All 5 model files present in $modelDir")
 
-            // 2. 使用官方 Builder API 构建 KeywordSpotter（非反射）
+            // 2. 使用官方 Kotlin data class 构建配置（非反射、非 Builder）
             val encoderPath = File(modelDir, ENCODER_FILE).absolutePath
             val decoderPath = File(modelDir, DECODER_FILE).absolutePath
             val joinerPath = File(modelDir, JOINER_FILE).absolutePath
             val tokensPath = File(modelDir, TOKENS_FILE).absolutePath
             val keywordsPath = File(modelDir, KEYWORDS_FILE).absolutePath
 
-            Log.i(TAG, "Building KeywordSpotterConfig with official Builder API...")
+            Log.i(TAG, "Building KeywordSpotterConfig with Kotlin data class constructors...")
 
-            val featConfig = FeatureConfig.builder()
-                .setSampleRate(SAMPLE_RATE)
-                .setFeatureDim(80)
-                .build()
+            val config = KeywordSpotterConfig(
+                featConfig = FeatureConfig(
+                    sampleRate = SAMPLE_RATE,
+                    featureDim = 80
+                ),
+                modelConfig = OnlineModelConfig(
+                    transducer = OnlineTransducerModelConfig(
+                        encoder = encoderPath,
+                        decoder = decoderPath,
+                        joiner = joinerPath
+                    ),
+                    tokens = tokensPath,
+                    numThreads = 2,
+                    debug = false,
+                    provider = "cpu"
+                ),
+                keywordsFile = keywordsPath,
+                keywordsScore = 1.5f,
+                keywordsThreshold = 0.25f,
+                numTrailingBlanks = 2
+            )
 
-            val transducerConfig = OnlineTransducerModelConfig.builder()
-                .setEncoder(encoderPath)
-                .setDecoder(decoderPath)
-                .setJoiner(joinerPath)
-                .build()
-
-            val modelConfig = OnlineModelConfig.builder()
-                .setTransducer(transducerConfig)
-                .setTokens(tokensPath)
-                .setNumThreads(2)
-                .setDebug(false)
-                .setProvider("cpu")
-                .build()
-
-            val config = KeywordSpotterConfig.builder()
-                .setFeatureConfig(featConfig)
-                .setOnlineModelConfig(modelConfig)
-                .setKeywordsFile(keywordsPath)
-                .setKeywordsScore(1.5f)
-                .setKeywordsThreshold(0.25f)
-                .setNumTrailingBlanks(2)
-                .setMaxActivePaths(4)
-                .build()
-
-            Log.i(TAG, "Creating KeywordSpotter...")
-            spotter = KeywordSpotter(config)
+            Log.i(TAG, "Creating KeywordSpotter (newFromFile mode)...")
+            spotter = KeywordSpotter(assetManager = null, config = config)
             Log.i(TAG, "KeywordSpotter created successfully!")
 
             kwsReady = true
