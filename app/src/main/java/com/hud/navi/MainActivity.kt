@@ -160,8 +160,8 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     companion object {
         private const val PERM_REQUEST = 100
         private const val TAG = "HudNavi"
-        private const val ROAD_FETCH_DIST = 150.0
-        private const val ROAD_FETCH_INTERVAL = 5000L
+        private const val ROAD_FETCH_DIST = 800.0
+        private const val ROAD_FETCH_INTERVAL = 15000L
         private const val COMPASS_EMA_ALPHA = 0.08f
         private const val HEADING_DEAD_ZONE = 2.5f
         private const val FREEZE_ACC_THRESHOLD = 0.5f

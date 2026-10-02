@@ -25,12 +25,12 @@ import android.view.View
 import kotlin.math.*
 
 /**
- * hud-navi v10.0 — 应用图标 + 签名发布 + GitHub Release
+ * hud-navi v10.1 — 箭头增大 + 地图固定中心渲染
  *
- * v10.0 变更：
- * - 新增自定义应用图标（HUD 导航风格）
- * - 配置 release 签名（keystore）
- * - CI 自动构建 release APK 并发布到 GitHub Releases
+ * v10.1 变更：
+ * - 车标箭头尺寸 28f→44f，光晕半径 30→50，alpha 0x33→0x55，描边加粗 3px
+ * - 地图渲染使用 mapCenterLat/mapCenterLng 固定中心，车在地图上移动
+ * - ROAD_FETCH_DIST 150m→500m，减少不必要的刷新
  */
 class HudView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
@@ -56,6 +56,10 @@ class HudView @JvmOverloads constructor(
     var snappedLat: Double = 0.0
     var snappedLng: Double = 0.0
     var isSnapped: Boolean = false
+
+    // === 地图中心（固定不动，车在地图上移动） ===
+    var mapCenterLat: Double = 0.0
+    var mapCenterLng: Double = 0.0
 
     // === 速度制动态缩放 ===
     private fun getDynamicZoom(speedKmh: Float): Float {
@@ -182,6 +186,7 @@ class HudView @JvmOverloads constructor(
     }
 
     private fun drawRoadNetwork(canvas: Canvas, w: Float, h: Float, metersPerPixel: Double) {
+        // 车永远在屏幕中心，路网以车辆位置为中心绘制
         val drawLat = if (isSnapped) snappedLat else vehicleLat
         val drawLng = if (isSnapped) snappedLng else vehicleLng
         val cx = w / 2f
@@ -238,14 +243,16 @@ class HudView @JvmOverloads constructor(
         vehicleFillPaint.color = speedColor
         vehicleStrokePaint.color = speedColor
 
-        if (isSnapped) {
-            // 吸附光晕也用速度色
-            snapGlowPaint.color = Color.argb(0x33,
-                Color.red(speedColor), Color.green(speedColor), Color.blue(speedColor))
-            canvas.drawCircle(cx, cy, 30f, snapGlowPaint)
+        // 外层白色光晕 — HUD 投影下更醒目
+        val outerGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(0x44, 255, 255, 255)
+            style = Paint.Style.STROKE
+            strokeWidth = 8f
+            maskFilter = BlurMaskFilter(12f, BlurMaskFilter.Blur.OUTER)
         }
 
-        val size = 28f
+        // 增大箭头尺寸：44f → 60f（HUD 投影需要更大）
+        val size = 60f
         val tipY = cy - size * 1.4f
         val shoulderY = cy + size * 0.3f
         val tailY = cy + size * 0.8f
@@ -262,6 +269,17 @@ class HudView @JvmOverloads constructor(
             close()
         }
 
+        // 吸附光晕（速度色）
+        if (isSnapped) {
+            snapGlowPaint.color = Color.argb(0x66,
+                Color.red(speedColor), Color.green(speedColor), Color.blue(speedColor))
+            canvas.drawCircle(cx, cy, 60f, snapGlowPaint)
+        }
+
+        // 白色外发光
+        canvas.drawPath(dartPath, outerGlowPaint)
+        // 主体
+        vehicleStrokePaint.strokeWidth = 3f
         canvas.drawPath(dartPath, vehicleFillPaint)
         canvas.drawPath(dartPath, vehicleStrokePaint)
     }
