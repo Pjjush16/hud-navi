@@ -239,26 +239,56 @@ class HudView @JvmOverloads constructor(
         val cx = w / 2f
         val cy = h * 0.55f
 
-        // 纯白色箭头，简洁风格，无发光效果
-        val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        // 放大燕尾箭头（v10.13 恢复燕尾样式 + 放大 + 蓝色底白边圆圈）
+        val size = 48f
+
+        // === 外层：蓝色底 + 实心白边圆圈 ===
+        val circleRadius = size * 1.3f
+
+        // 白色外圈（先画大一点的白色实心圆作为边框）
+        val whiteBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
             style = Paint.Style.FILL
         }
+        canvas.drawCircle(cx, cy, circleRadius + 3f, whiteBorderPaint)
 
-        // 标准三角形箭头，小尺寸
-        val size = 24f
-        val tipY = cy - size * 1.2f
-        val baseY = cy + size * 0.4f
-        val halfW = size * 0.5f
+        // 蓝色实心圆（覆盖在白色圆上面，留出白色边缘）
+        val blueFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#2196F3")
+            style = Paint.Style.FILL
+        }
+        canvas.drawCircle(cx, cy, circleRadius, blueFillPaint)
 
-        val arrowPath = Path().apply {
+        // === 燕尾箭头 ===
+        val arrowFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            style = Paint.Style.FILL
+        }
+        val arrowStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            style = Paint.Style.STROKE
+            strokeWidth = 2.5f
+            strokeJoin = Paint.Join.ROUND
+        }
+
+        val tipY = cy - size * 1.4f
+        val shoulderY = cy + size * 0.3f
+        val tailY = cy + size * 0.8f
+        val indentY = cy
+        val halfW = size * 0.55f
+
+        val dartPath = Path().apply {
             moveTo(cx, tipY)
-            lineTo(cx - halfW, baseY)
-            lineTo(cx + halfW, baseY)
+            lineTo(cx - halfW, shoulderY)
+            lineTo(cx - halfW * 0.4f, tailY)
+            lineTo(cx, indentY)
+            lineTo(cx + halfW * 0.4f, tailY)
+            lineTo(cx + halfW, shoulderY)
             close()
         }
 
-        canvas.drawPath(arrowPath, arrowPaint)
+        canvas.drawPath(dartPath, arrowFillPaint)
+        canvas.drawPath(dartPath, arrowStrokePaint)
     }
 
     private fun drawSpeedometer(canvas: Canvas, w: Float, h: Float) {
