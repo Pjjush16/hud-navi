@@ -160,8 +160,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     companion object {
         private const val PERM_REQUEST = 100
         private const val TAG = "HudNavi"
-        private const val ROAD_FETCH_DIST = 800.0
-        private const val ROAD_FETCH_INTERVAL = 15000L
+        // v10.11: 地图刷新优化 — 距离阈值降低，间隔增大，减少频繁刷新
+        private const val ROAD_FETCH_DIST = 500.0
+        private const val ROAD_FETCH_INTERVAL = 20000L
         private const val COMPASS_EMA_ALPHA = 0.08f
         private const val HEADING_DEAD_ZONE = 2.5f
         private const val FREEZE_ACC_THRESHOLD = 0.5f
@@ -518,10 +519,18 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private fun tryFetchRoads() {
         if (targetLat == 0.0) return
         val now = System.currentTimeMillis()
-        val dist = RoadFetcher.haversine(targetLat, targetLng, lastRoadFetchLat, lastRoadFetchLng)
+        // v10.11: 地图刷新逻辑优化 — 以路网缓存中心为基准
+        // 只有车辆移动到离缓存中心超过 ROAD_FETCH_DIST 时才刷新
+        // 避免因 GPS 抖动或缓慢移动频繁触发刷新
+        val distFromCenter = RoadFetcher.haversine(targetLat, targetLng, lastRoadFetchLat, lastRoadFetchLng)
         val timeSince = now - lastRoadFetchTime
 
-        if (dist > ROAD_FETCH_DIST || (timeSince > ROAD_FETCH_INTERVAL && !RoadFetcher.isCacheValid(targetLat, targetLng))) {
+        // 条件1: 距离缓存中心超过阈值
+        // 条件2: 时间间隔已过 且 缓存不再有效（距离超过 800m 缓存边界）
+        val shouldFetch = (distFromCenter > ROAD_FETCH_DIST) ||
+            (timeSince > ROAD_FETCH_INTERVAL && !RoadFetcher.isCacheValid(targetLat, targetLng))
+
+        if (shouldFetch) {
             lastRoadFetchLat = targetLat; lastRoadFetchLng = targetLng
             lastRoadFetchTime = now
 
@@ -543,6 +552,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         lastFrameTime = now
 
         detectIntersection()
+
+        // === v10.11: 传递吸附状态给 EKF（惯导仅吸附时激活）===
+        val prevSnapped = ekf.snappedToRoad
 
         ekf.predict(dt, vehicleBearing, targetSpeed * 1000f / 3600f)
         vehicleLat = ekf.lat; vehicleLng = ekf.lng
@@ -593,6 +605,33 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         }
         if (snapped == null) {
             snapped = hmmMapMatchWithSigma(vehicleLat, vehicleLng, targetSpeed, vehicleBearing, adaptiveSigma)
+        }
+
+        // === v10.11: 将吸附状态传递给 EKF 惯导引擎 ===
+        if (snapped != null && hmmConfidence > HMM_MIN_CONFIDENCE) {
+            ekf.snappedToRoad = true
+            // 计算吸附路段走向
+            if (matchedSegIdx >= 0 && matchedSegIdx < hudView.roadSegments.size) {
+                val seg = hudView.roadSegments[matchedSegIdx]
+                if (seg.points.size >= 2) {
+                    // 找到最近的路段点对，计算走向
+                    val midIdx = seg.points.size / 2
+                    val (p1Lat, p1Lng) = seg.points[maxOf(0, midIdx - 1)]
+                    val (p2Lat, p2Lng) = seg.points[minOf(seg.points.size - 1, midIdx)]
+                    ekf.roadHeadingDeg = bearingBetween(p1Lat, p1Lng, p2Lat, p2Lng).toDouble()
+                }
+            }
+            // 路网约束伪观测：将吸附位置注入 EKF 修正惯导漂移
+            if (hmmConfidence > 0.3) {
+                ekf.roadConstrainedUpdate(
+                    snapped.first, snapped.second,
+                    hmmConfidence, ekf.roadHeadingDeg.toFloat(),
+                    System.currentTimeMillis()
+                )
+            }
+        } else {
+            ekf.snappedToRoad = false
+            ekf.snapConfidence = 0.0
         }
 
         // === 平滑绘制位置：消除吸附/脱吸附抖动 ===

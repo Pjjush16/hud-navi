@@ -25,12 +25,13 @@ import android.view.View
 import kotlin.math.*
 
 /**
- * hud-navi v10.1 — 箭头增大 + 地图固定中心渲染
+ * hud-navi v10.11 — 路网约束惯导 + 地图刷新优化
  *
- * v10.1 变更：
- * - 车标箭头尺寸 28f→44f，光晕半径 30→50，alpha 0x33→0x55，描边加粗 3px
- * - 地图渲染使用 mapCenterLat/mapCenterLng 固定中心，车在地图上移动
- * - ROAD_FETCH_DIST 150m→500m，减少不必要的刷新
+ * v10.11 变更：
+ * - 惯导仅在路网吸附时激活（未吸附 = GPS-only，不做 IMU 推算）
+ * - 惯导方向沿道路走向（roadHeadingDeg），不能惯出道路
+ * - GPS 精度动态加权：< 5m GPS 主导，> 15m INS 主导
+ * - 地图刷新距离 800m→500m，间隔 15s→20s
  */
 class HudView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
