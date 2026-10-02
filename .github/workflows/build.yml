@@ -16,7 +16,7 @@ permissions:
   contents: write
 
 env:
-  SHERPA_ONNX_VERSION: "1.10.38"
+  SHERPA_ONNX_VERSION: "1.13.8"
 
 jobs:
   build:
