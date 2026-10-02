@@ -25,13 +25,13 @@ import android.view.View
 import kotlin.math.*
 
 /**
- * hud-navi v10.22 — 本地缓存优先 + 哈希比对智能重绘
+ * hud-navi v10.23 — 逐段哈希 + 增量 diff 更新
  *
- * v10.22 变更：
- * - 磁盘缓存永不过期，启动时优先显示本地缓存路网
- * - 网络请求后 SHA-256 哈希比对，数据相同不重绘
- * - FetchResult 返回 needRerender 标志，避免无谓刷新
- * - 启动时加载磁盘缓存后标记已渲染
+ * v10.23 变更：
+ * - 每条路网段独立 SHA-256 哈希，不再整图哈希
+ * - 新旧哈希集合做差集 → 精确检测 added/removed 段
+ * - 增量合并：保留不变段 + 加入新段 - 移除旧段
+ * - 只有实际存在段增删时才重绘，位置微偏不触发全量刷新
  *
  * v10.21 变更：
  * - 修复 setRoads 从 IO 线程调用 invalidate() 导致路网加载后不渲染（改用 postInvalidate()）
