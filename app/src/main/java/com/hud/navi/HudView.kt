@@ -239,50 +239,26 @@ class HudView @JvmOverloads constructor(
         val cx = w / 2f
         val cy = h * 0.55f
 
-        // 车标颜色随速度变化：绿→黄→红
-        val speedColor = getSpeedColor(vehicleSpeed)
-        vehicleFillPaint.color = speedColor
-        vehicleStrokePaint.color = speedColor
-
-        // 外层白色光晕 — HUD 投影下更醒目
-        val outerGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(0x44, 255, 255, 255)
-            style = Paint.Style.STROKE
-            strokeWidth = 8f
-            maskFilter = BlurMaskFilter(12f, BlurMaskFilter.Blur.OUTER)
+        // 纯白色箭头，简洁风格，无发光效果
+        val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            style = Paint.Style.FILL
         }
 
-        // 增大箭头尺寸：44f → 60f（HUD 投影需要更大）
-        val size = 60f
-        val tipY = cy - size * 1.4f
-        val shoulderY = cy + size * 0.3f
-        val tailY = cy + size * 0.8f
-        val indentY = cy
-        val halfW = size * 0.55f
+        // 标准三角形箭头，小尺寸
+        val size = 24f
+        val tipY = cy - size * 1.2f
+        val baseY = cy + size * 0.4f
+        val halfW = size * 0.5f
 
-        val dartPath = Path().apply {
+        val arrowPath = Path().apply {
             moveTo(cx, tipY)
-            lineTo(cx - halfW, shoulderY)
-            lineTo(cx - halfW * 0.4f, tailY)
-            lineTo(cx, indentY)
-            lineTo(cx + halfW * 0.4f, tailY)
-            lineTo(cx + halfW, shoulderY)
+            lineTo(cx - halfW, baseY)
+            lineTo(cx + halfW, baseY)
             close()
         }
 
-        // 吸附光晕（速度色）
-        if (isSnapped) {
-            snapGlowPaint.color = Color.argb(0x66,
-                Color.red(speedColor), Color.green(speedColor), Color.blue(speedColor))
-            canvas.drawCircle(cx, cy, 60f, snapGlowPaint)
-        }
-
-        // 白色外发光
-        canvas.drawPath(dartPath, outerGlowPaint)
-        // 主体
-        vehicleStrokePaint.strokeWidth = 3f
-        canvas.drawPath(dartPath, vehicleFillPaint)
-        canvas.drawPath(dartPath, vehicleStrokePaint)
+        canvas.drawPath(arrowPath, arrowPaint)
     }
 
     private fun drawSpeedometer(canvas: Canvas, w: Float, h: Float) {
