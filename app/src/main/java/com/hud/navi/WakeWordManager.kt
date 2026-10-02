@@ -9,12 +9,6 @@
  *   - 哈德哈德
  *
  * 模型: sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile
- *
- * 使用方式：
- *   val wm = WakeWordManager(context) { keyword -> ... }
- *   wm.init()    // 在 onCreate 中调用
- *   wm.start()   // 在 onResume 中调用
- *   wm.stop()    // 在 onPause 中调用
  */
 
 package com.hud.navi
@@ -26,6 +20,7 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.util.Log
+import android.widget.Toast
 import androidx.core.content.ContextCompat
 import java.io.File
 import java.io.FileOutputStream
@@ -39,7 +34,6 @@ class WakeWordManager(
         private const val TAG = "WakeWord"
         private const val SAMPLE_RATE = 16000
 
-        // 模型文件在 assets 中的相对路径
         private const val ASSET_DIR = "kws"
         private const val ENCODER_FILE = "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx"
         private const val DECODER_FILE = "decoder-epoch-12-avg-2-chunk-16-left-64.onnx"
@@ -53,13 +47,14 @@ class WakeWordManager(
     private var audioRecord: AudioRecord? = null
     private var listenThread: Thread? = null
     private val running = AtomicBoolean(false)
-    private var kwsReady = false
+    var kwsReady = false
+        private set
+    var initError: String? = null
+        private set
 
-    // sherpa-onnx 对象（延迟绑定，避免编译期硬依赖）
     private var spotter: Any? = null
     private var kwsStream: Any? = null
 
-    // 缓存反射方法
     private var createStreamMethod: java.lang.reflect.Method? = null
     private var isReadyMethod: java.lang.reflect.Method? = null
     private var decodeStreamMethod: java.lang.reflect.Method? = null
@@ -69,13 +64,15 @@ class WakeWordManager(
     private var streamClass: Class<*>? = null
 
     fun init() {
+        initError = null
         try {
             val modelDir = File(context.filesDir, MODEL_DIR)
             if (!modelDir.exists()) modelDir.mkdirs()
 
-            // 1. 从 assets 释放模型文件到内部存储
+            // 1. 从 assets 释放模型文件
             val modelFiles = listOf(ENCODER_FILE, DECODER_FILE, JOINER_FILE, TOKENS_FILE, KEYWORDS_FILE)
             var allReady = true
+            val missingFiles = mutableListOf<String>()
 
             for (fileName in modelFiles) {
                 val target = File(modelDir, fileName)
@@ -88,30 +85,40 @@ class WakeWordManager(
                         }
                         Log.i(TAG, "Extracted: $fileName (${target.length()} bytes)")
                     } catch (e: Exception) {
-                        Log.w(TAG, "Asset missing: $ASSET_DIR/$fileName — ${e.message}")
+                        Log.e(TAG, "Asset missing: $ASSET_DIR/$fileName — ${e.message}")
                         allReady = false
+                        missingFiles.add(fileName)
                     }
                 }
             }
 
             if (!allReady) {
-                Log.w(TAG, "Model files incomplete. Run download_kws_model.sh first.")
+                initError = "模型文件缺失: ${missingFiles.joinToString(", ")}"
+                Log.e(TAG, initError!!)
+                // 显示详细 Toast 便于调试
+                Toast.makeText(context, "语音唤醒失败: $initError", Toast.LENGTH_LONG).show()
                 return
             }
 
-            // 2. 通过反射创建 KeywordSpotter（避免编译期对 sherpa-onnx 的强依赖）
+            Log.i(TAG, "All 5 model files present in $modelDir")
+
+            // 2. 创建 KeywordSpotter
             val encoderPath = File(modelDir, ENCODER_FILE).absolutePath
             val decoderPath = File(modelDir, DECODER_FILE).absolutePath
             val joinerPath = File(modelDir, JOINER_FILE).absolutePath
             val tokensPath = File(modelDir, TOKENS_FILE).absolutePath
             val keywordsPath = File(modelDir, KEYWORDS_FILE).absolutePath
 
-            spotter = createKeywordSpotter(
-                tokensPath, encoderPath, decoderPath, joinerPath, keywordsPath
-            )
+            Log.i(TAG, "Creating KeywordSpotter...")
+            Log.i(TAG, "  encoder: $encoderPath")
+            Log.i(TAG, "  decoder: $decoderPath")
+            Log.i(TAG, "  joiner:  $joinerPath")
+            Log.i(TAG, "  tokens:  $tokensPath")
+            Log.i(TAG, "  keywords: $keywordsPath")
+
+            spotter = createKeywordSpotter(tokensPath, encoderPath, decoderPath, joinerPath, keywordsPath)
 
             if (spotter != null) {
-                // 缓存反射方法
                 val spotterClass = spotter!!.javaClass
                 Log.i(TAG, "Spotter class: ${spotterClass.name}")
                 Log.i(TAG, "Spotter methods: ${spotterClass.methods.map { "${it.name}(${it.parameterTypes.joinToString { it.simpleName }})" }.take(20)}")
@@ -129,97 +136,161 @@ class WakeWordManager(
                 )
 
                 kwsReady = true
-                Log.i(TAG, "KeywordSpotter initialized — all 7 methods cached, ready to listen")
+                Log.i(TAG, "KeywordSpotter initialized successfully — all methods cached")
             } else {
-                Log.e(TAG, "Spotter is null — KWS will not work")
+                initError = "KeywordSpotter 创建失败（sherpa-onnx 可能未正确加载）"
+                Log.e(TAG, initError!!)
+                Toast.makeText(context, "语音唤醒失败: $initError", Toast.LENGTH_LONG).show()
             }
         } catch (e: ClassNotFoundException) {
-            Log.e(TAG, "sherpa-onnx not found on classpath. Check dependency: com.k2fsa.sherpa:onnx")
+            initError = "sherpa-onnx 库未找到: ${e.message}"
+            Log.e(TAG, initError!!, e)
+            Toast.makeText(context, "语音唤醒失败: $initError", Toast.LENGTH_LONG).show()
         } catch (e: Exception) {
-            Log.e(TAG, "WakeWordManager init failed: ${e.message}", e)
+            initError = "初始化异常: ${e.javaClass.simpleName}: ${e.message}"
+            Log.e(TAG, initError!!, e)
+            Toast.makeText(context, "语音唤醒失败: $initError", Toast.LENGTH_LONG).show()
         }
     }
 
     /**
-     * 创建 KeywordSpotter 实例（通过反射，兼容多个版本的 sherpa-onnx API）
+     * 创建 KeywordSpotter（多重策略，兼容 sherpa-onnx 多个版本）
      */
     private fun createKeywordSpotter(
         tokens: String, encoder: String, decoder: String,
         joiner: String, keywords: String
     ): Any? {
-        return try {
-            // 方式1: 尝试 sherpa-onnx v1.10+ Java API
+        // === 策略 1：Config 对象 + 构造函数 ===
+        try {
             val configClass = Class.forName("com.k2fsa.sherpa.onnx.KeywordSpotterConfig")
-            val config = configClass.newInstance()
+            val config = configClass.getDeclaredConstructor().newInstance()
+            Log.i(TAG, "Config class: ${configClass.name}")
 
-            // 尝试通过 setter 或字段设置
-            trySetField(config, "tokens", tokens)
-            trySetField(config, "encoder", encoder)
-            trySetField(config, "decoder", decoder)
-            trySetField(config, "joiner", joiner)
-            trySetField(config, "keywordsFile", keywords)
-            trySetField(config, "numThreads", 2)
-            trySetField(config, "sampleRate", 16000.0f)
-            trySetField(config, "featureDim", 80)
-            trySetField(config, "maxActivePaths", 4)
-            trySetField(config, "keywordsScore", 1.0f)
-            trySetField(config, "keywordsThreshold", 0.25f)
-            trySetField(config, "numTrailingBlanks", 1)
-            trySetField(config, "provider", "cpu")
-            trySetField(config, "device", 0)
+            // 列出所有字段用于调试
+            configClass.declaredFields.forEach { f ->
+                Log.d(TAG, "  Config field: ${f.name} (${f.type.simpleName})")
+            }
+
+            // 逐个设置字段，正确处理原始类型
+            setFieldSmart(config, "tokens", tokens)
+            setFieldSmart(config, "encoder", encoder)
+            setFieldSmart(config, "decoder", decoder)
+            setFieldSmart(config, "joiner", joiner)
+            setFieldSmart(config, "keywordsFile", keywords)
+            setFieldSmart(config, "numThreads", 2)
+            setFieldSmart(config, "sampleRate", 16000)
+            setFieldSmart(config, "featureDim", 80)
+            setFieldSmart(config, "maxActivePaths", 4)
+            setFieldSmart(config, "keywordsScore", 1.0f)
+            setFieldSmart(config, "keywordsThreshold", 0.25f)
+            setFieldSmart(config, "numTrailingBlanks", 1)
+            setFieldSmart(config, "provider", "cpu")
+            setFieldSmart(config, "device", 0)
 
             val spotterClass = Class.forName("com.k2fsa.sherpa.onnx.KeywordSpotter")
-            spotterClass.getConstructor(configClass).newInstance(config)
+            val result = spotterClass.getConstructor(configClass).newInstance(config)
+            Log.i(TAG, "Strategy 1 (Config) SUCCESS")
+            return result
         } catch (e: Exception) {
-            Log.w(TAG, "KeywordSpotter creation method 1 failed: ${e.message}")
-            try {
-                // 方式2: 直接构造函数传参
-                val spotterClass = Class.forName("com.k2fsa.sherpa.onnx.KeywordSpotter")
-                val ctor = spotterClass.constructors.firstOrNull { it.parameterCount >= 5 }
-                if (ctor != null) {
-                    val params = Array(ctor.parameterCount) { i ->
-                        when (ctor.parameterTypes[i]) {
-                            String::class.java -> when (i) {
-                                0 -> tokens; 1 -> encoder; 2 -> decoder
-                                3 -> joiner; 4 -> keywords; else -> ""
-                            }
-                            Int::class.javaPrimitiveType -> 2
-                            Float::class.javaPrimitiveType -> 16000.0f
-                            else -> 0
-                        }
-                    }
-                    ctor.newInstance(*params)
-                } else {
-                    Log.e(TAG, "No suitable KeywordSpotter constructor found")
-                    null
-                }
-            } catch (e2: Exception) {
-                Log.e(TAG, "All creation methods failed: ${e2.message}")
-                null
-            }
+            Log.w(TAG, "Strategy 1 (Config) failed: ${e.javaClass.simpleName}: ${e.message}")
         }
+
+        // === 策略 2：直接构造函数（按参数类型智能映射）===
+        try {
+            val spotterClass = Class.forName("com.k2fsa.sherpa.onnx.KeywordSpotter")
+            Log.i(TAG, "Available constructors:")
+            spotterClass.constructors.forEach { ctor ->
+                Log.i(TAG, "  ${ctor.parameterTypes.map { it.simpleName }}")
+            }
+
+            for (ctor in spotterClass.constructors) {
+                val paramTypes = ctor.parameterTypes
+                if (paramTypes.size < 5) continue
+
+                val params = Array<Any?>(paramTypes.size) { i ->
+                    val pt = paramTypes[i]
+                    when {
+                        pt == String::class.java -> when (i) {
+                            0 -> tokens; 1 -> encoder; 2 -> decoder
+                            3 -> joiner; 4 -> keywords; else -> ""
+                        }
+                        pt == Int::class.javaPrimitiveType || pt == Integer::class.java -> 2
+                        pt == Float::class.javaPrimitiveType || pt == java.lang.Float::class.java -> 16000.0f
+                        pt == Boolean::class.javaPrimitiveType -> false
+                        else -> null
+                    }
+                }
+
+                // 检查是否有 null 参数（无法映射的类型）
+                if (params.any { it == null && paramTypes[params.indexOf(it)].isPrimitive }) continue
+
+                try {
+                    val result = ctor.newInstance(*params)
+                    Log.i(TAG, "Strategy 2 (direct ctor) SUCCESS with ${paramTypes.size} params")
+                    return result
+                } catch (e: Exception) {
+                    Log.w(TAG, "Strategy 2 ctor(${paramTypes.size}) failed: ${e.message}")
+                }
+            }
+
+            Log.e(TAG, "All constructors tried, none succeeded")
+        } catch (e: Exception) {
+            Log.e(TAG, "Strategy 2 failed: ${e.javaClass.simpleName}: ${e.message}")
+        }
+
+        return null
     }
 
-    private fun trySetField(obj: Any, fieldName: String, value: Any) {
+    /**
+     * 智能设置字段：自动处理原始类型和包装类型之间的转换
+     */
+    private fun setFieldSmart(obj: Any, fieldName: String, value: Any) {
         try {
             val field = obj.javaClass.getDeclaredField(fieldName)
             field.isAccessible = true
-            field.set(obj, value)
+            val fieldType = field.type
+
+            // 原始类型转换
+            val convertedValue: Any = when {
+                fieldType == Int::class.javaPrimitiveType && value is Number -> value.toInt()
+                fieldType == Float::class.javaPrimitiveType && value is Number -> value.toFloat()
+                fieldType == Double::class.javaPrimitiveType && value is Number -> value.toDouble()
+                fieldType == Long::class.javaPrimitiveType && value is Number -> value.toLong()
+                fieldType == Boolean::class.javaPrimitiveType && value is Boolean -> value
+                else -> value
+            }
+
+            field.set(obj, convertedValue)
+            Log.d(TAG, "  Set $fieldName = $value (${fieldType.simpleName}) OK")
         } catch (e: NoSuchFieldException) {
-            // 尝试 setter 方法
+            // 尝试 setter
             try {
-                val setter = obj.javaClass.getMethod(
-                    "set${fieldName.replaceFirstChar { it.uppercase() }}",
-                    value.javaClass
-                )
-                setter.invoke(obj, value)
-            } catch (_: Exception) {}
-        } catch (_: Exception) {}
+                val setterName = "set${fieldName.replaceFirstChar { it.uppercase() }}"
+                val methods = obj.javaClass.methods.filter { it.name == setterName }
+                if (methods.isNotEmpty()) {
+                    val setter = methods.first()
+                    val paramType = setter.parameterTypes.first()
+                    val convertedValue: Any = when {
+                        paramType == Int::class.javaPrimitiveType && value is Number -> value.toInt()
+                        paramType == Float::class.javaPrimitiveType && value is Number -> value.toFloat()
+                        else -> value
+                    }
+                    setter.invoke(obj, convertedValue)
+                    Log.d(TAG, "  Set $fieldName via setter OK")
+                } else {
+                    Log.w(TAG, "  $fieldName: no field or setter found")
+                }
+            } catch (e2: Exception) {
+                Log.w(TAG, "  $fieldName: setter failed: ${e2.message}")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "  $fieldName: set failed: ${e.javaClass.simpleName}: ${e.message}")
+        }
     }
 
     fun start() {
         if (!kwsReady) {
-            Log.w(TAG, "KWS not ready")
+            Log.w(TAG, "KWS not ready: ${initError ?: "unknown"}")
             return
         }
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
@@ -311,10 +382,9 @@ class WakeWordManager(
                     }
                 }
 
-                // 每5秒打印一次心跳日志
                 val now = System.currentTimeMillis()
                 if (now - lastLogTime > 5000) {
-                    Log.i(TAG, "Heartbeat: $chunkCount chunks processed, running=${running.get()}")
+                    Log.i(TAG, "Heartbeat: $chunkCount chunks, running=${running.get()}")
                     lastLogTime = now
                 }
             }
