@@ -159,8 +159,16 @@ object RoadFetcher {
             md.update(seg.type.name.toByteArray())
             for ((lat, lng) in seg.points) {
                 // 用 Int 近似（小数点后5位），避免浮点精度差异
-                md.update(((lat * 100000).toLong()).toByteArray())
-                md.update(((lng * 100000).toLong()).toByteArray())
+                val latInt = (lat * 100000).toInt()
+                val lngInt = (lng * 100000).toInt()
+                md.update(byteArrayOf(
+                    (latInt shr 24).toByte(), (latInt shr 16).toByte(),
+                    (latInt shr 8).toByte(), latInt.toByte()
+                ))
+                md.update(byteArrayOf(
+                    (lngInt shr 24).toByte(), (lngInt shr 16).toByte(),
+                    (lngInt shr 8).toByte(), lngInt.toByte()
+                ))
             }
         }
         return md.digest().joinToString("") { "%02x".format(it) }
