@@ -161,7 +161,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         private const val PERM_REQUEST = 100
         private const val TAG = "HudNavi"
         // v10.11: 地图刷新优化 — 距离阈值降低，间隔增大，减少频繁刷新
-        private const val ROAD_FETCH_DIST = 300.0
+        private const val ROAD_FETCH_DIST = 500.0
         private const val ROAD_FETCH_INTERVAL = 15000L
         private const val COMPASS_EMA_ALPHA = 0.08f
         private const val HEADING_DEAD_ZONE = 2.5f

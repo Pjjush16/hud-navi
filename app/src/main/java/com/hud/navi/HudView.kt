@@ -25,13 +25,12 @@ import android.view.View
 import kotlin.math.*
 
 /**
- * hud-navi v10.11 — 路网约束惯导 + 地图刷新优化
+ * hud-navi v10.21 — 预渲染修复 + 路网缓存扩大
  *
- * v10.11 变更：
- * - 惯导仅在路网吸附时激活（未吸附 = GPS-only，不做 IMU 推算）
- * - 惯导方向沿道路走向（roadHeadingDeg），不能惯出道路
- * - GPS 精度动态加权：< 5m GPS 主导，> 15m INS 主导
- * - 地图刷新距离 800m→500m，间隔 15s→20s
+ * v10.21 变更：
+ * - 修复 setRoads 从 IO 线程调用 invalidate() 导致路网加载后不渲染（改用 postInvalidate()）
+ * - 路网查询半径 2000m → 3000m，缓存有效距离 1500m → 2500m
+ * - 刷新触发距离 300m → 500m，保证前方始终有已渲染路网
  */
 class HudView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
@@ -132,7 +131,8 @@ class HudView @JvmOverloads constructor(
     fun setRoads(segments: List<RoadFetcher.RoadSegment>, centerLat: Double, centerLng: Double) {
         roadSegments = segments
         hasRoads = segments.isNotEmpty()
-        invalidate()
+        // postInvalidate() 线程安全，可从 IO 线程调用；invalidate() 只能在 UI 线程调用
+        postInvalidate()
     }
 
     override fun onDraw(canvas: Canvas) {

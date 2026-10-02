@@ -42,7 +42,7 @@ object RoadFetcher {
 
     private const val TAG = "RoadFetcher"
     private const val OVERPASS_URL = "https://overpass-api.de/api/interpreter"
-    private const val RADIUS = 2000
+    private const val RADIUS = 3000
     private const val MIN_INTERVAL_MS = 3000
 
     private var lastFetchTime = 0L
@@ -295,6 +295,6 @@ object RoadFetcher {
     }
 
     fun isCacheValid(lat: Double, lng: Double): Boolean {
-        return cachedSegments.isNotEmpty() && haversine(lat, lng, cacheCenterLat, cacheCenterLng) < 1500.0
+        return cachedSegments.isNotEmpty() && haversine(lat, lng, cacheCenterLat, cacheCenterLng) < 2500.0
     }
 }
