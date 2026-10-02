@@ -239,7 +239,7 @@ class HudView @JvmOverloads constructor(
         val cx = w / 2f
         val cy = h * 0.55f
 
-        // 放大燕尾箭头（v10.13 恢复燕尾样式 + 放大 + 蓝色底白边圆圈）
+        // 放大燕尾箭头（v10.15 修复方向：朝上指 + 蓝色底白边圆圈）
         val size = 48f
 
         // === 外层：蓝色底 + 实心白边圆圈 ===
@@ -259,7 +259,7 @@ class HudView @JvmOverloads constructor(
         }
         canvas.drawCircle(cx, cy, circleRadius, blueFillPaint)
 
-        // === 燕尾箭头 ===
+        // === 燕尾箭头（朝上指） ===
         val arrowFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
             style = Paint.Style.FILL
@@ -271,19 +271,20 @@ class HudView @JvmOverloads constructor(
             strokeJoin = Paint.Join.ROUND
         }
 
-        val tipY = cy - size * 1.4f
-        val shoulderY = cy + size * 0.3f
-        val tailY = cy + size * 0.8f
-        val indentY = cy
+        // 朝上指：tip 在最上面，shoulder 在中间，indent+tail 在下面
+        val tipY = cy - size * 1.4f       // 箭头尖端（最上面）
+        val shoulderY = cy - size * 0.3f // 肩膀（中间偏上）
+        val indentY = cy + size * 0.2f   // 凹口（中间）
+        val tailY = cy + size * 0.6f     // 燕尾末端（最下面）
         val halfW = size * 0.55f
 
         val dartPath = Path().apply {
-            moveTo(cx, tipY)
-            lineTo(cx - halfW, shoulderY)
-            lineTo(cx - halfW * 0.4f, tailY)
-            lineTo(cx, indentY)
-            lineTo(cx + halfW * 0.4f, tailY)
-            lineTo(cx + halfW, shoulderY)
+            moveTo(cx, tipY)                   // 顶部尖端
+            lineTo(cx - halfW, shoulderY)      // 左肩
+            lineTo(cx - halfW * 0.4f, tailY)   // 左燕尾
+            lineTo(cx, indentY)                // 凹口（中间）
+            lineTo(cx + halfW * 0.4f, tailY)   // 右燕尾
+            lineTo(cx + halfW, shoulderY)      // 右肩
             close()
         }
 

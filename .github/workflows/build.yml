@@ -52,6 +52,26 @@ jobs:
           else
             echo "WARNING: AAR download failed"
           fi
+          
+          # 手动从 AAR 中提取 .so 原生库到 jniLibs/
+          # 这是确保 fileTree AAR 依赖正确加载 native library 的可靠方法
+          echo "Extracting native .so files from AAR..."
+          mkdir -p /tmp/aar-extract
+          unzip -o app/libs/sherpa-onnx.aar -d /tmp/aar-extract/ > /dev/null 2>&1
+          
+          # 复制所有架构的 .so 文件
+          for arch in arm64-v8a armeabi-v7a x86 x86_64; do
+            if [ -d "/tmp/aar-extract/jni/$arch" ]; then
+              mkdir -p "app/src/main/jniLibs/$arch"
+              cp -v "/tmp/aar-extract/jni/$arch/"*.so "app/src/main/jniLibs/$arch/" 2>/dev/null || true
+            fi
+          done
+          
+          echo "=== Extracted jniLibs ==="
+          find app/src/main/jniLibs -name "*.so" | sort
+          echo "=== AAR contents (jni/) ==="
+          ls -la /tmp/aar-extract/jni/ 2>/dev/null || echo "No jni/ in AAR"
+          rm -rf /tmp/aar-extract
 
       - name: Download KWS Model
         run: |
