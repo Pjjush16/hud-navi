@@ -41,37 +41,12 @@ jobs:
           echo "Downloading sherpa-onnx v${SHERPA_VERSION} Android SDK..."
           
           mkdir -p app/libs
-          mkdir -p app/src/main/jniLibs
           
-          # Download AAR — 直接使用完整 AAR 文件
           AAR_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/v${SHERPA_VERSION}/sherpa-onnx-${SHERPA_VERSION}.aar"
           echo "Downloading AAR: $AAR_URL"
-          if wget -q "$AAR_URL" -O app/libs/sherpa-onnx.aar 2>&1; then
-            echo "AAR downloaded: $(stat -c%s app/libs/sherpa-onnx.aar) bytes"
-            ls -lh app/libs/sherpa-onnx.aar
-          else
-            echo "WARNING: AAR download failed"
-          fi
-          
-          # 手动从 AAR 中提取 .so 原生库到 jniLibs/
-          # 这是确保 fileTree AAR 依赖正确加载 native library 的可靠方法
-          echo "Extracting native .so files from AAR..."
-          mkdir -p /tmp/aar-extract
-          unzip -o app/libs/sherpa-onnx.aar -d /tmp/aar-extract/ > /dev/null 2>&1
-          
-          # 复制所有架构的 .so 文件
-          for arch in arm64-v8a armeabi-v7a x86 x86_64; do
-            if [ -d "/tmp/aar-extract/jni/$arch" ]; then
-              mkdir -p "app/src/main/jniLibs/$arch"
-              cp -v "/tmp/aar-extract/jni/$arch/"*.so "app/src/main/jniLibs/$arch/" 2>/dev/null || true
-            fi
-          done
-          
-          echo "=== Extracted jniLibs ==="
-          find app/src/main/jniLibs -name "*.so" | sort
-          echo "=== AAR contents (jni/) ==="
-          ls -la /tmp/aar-extract/jni/ 2>/dev/null || echo "No jni/ in AAR"
-          rm -rf /tmp/aar-extract
+          wget -q "$AAR_URL" -O app/libs/sherpa-onnx.aar
+          echo "AAR downloaded: $(stat -c%s app/libs/sherpa-onnx.aar) bytes"
+          ls -lh app/libs/sherpa-onnx.aar
 
       - name: Download KWS Model
         run: |
@@ -98,53 +73,19 @@ jobs:
       - name: Build Debug APK
         run: ./gradlew assembleDebug
 
-      - name: Build unsigned Release APK
-        run: ./gradlew assembleRelease -Pandroid.injected.signing=false || ./gradlew assembleRelease
+      - name: Build Signed Release APK
+        run: ./gradlew assembleRelease
 
-      - name: zipalign + sign Release APK
+      - name: Verify Release APK signature
         run: |
-          echo "=== zipalign ==="
-          ZIPALIGN=$(find $ANDROID_HOME/build-tools -name zipalign | sort -V | tail -1)
           APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -1)
-          echo "zipalign: $ZIPALIGN"
-          echo "apksigner: $APKSIGNER"
-          
-          mkdir -p app/build/outputs/apk/release-aligned
-          
-          for apk in app/build/outputs/apk/release/*-release-unsigned.apk app/build/outputs/apk/release/*-release.apk; do
+          echo "=== Verifying release APKs ==="
+          for apk in app/build/outputs/apk/release/*-release.apk; do
             [ -f "$apk" ] || continue
-            base=$(basename "$apk" .apk)
-            # Remove signing suffix if present
-            base=$(echo "$base" | sed 's/-release-unsigned/-release/' | sed 's/-release/-release/')
-            aligned="app/build/outputs/apk/release-aligned/${base}-aligned.apk"
-            signed="app/build/outputs/apk/release-aligned/${base}.apk"
-            
-            echo "Processing: $apk"
-            
-            # Step 1: zipalign (MUST be before signing)
-            $ZIPALIGN -f -v 4 "$apk" "$aligned" 2>&1 | tail -1
-            
-            # Step 2: sign with apksigner (V1 + V2)
-            $APKSIGNER sign \
-              --ks keystore/hud-navi-release.jks \
-              --ks-key-alias hud-navi \
-              --ks-pass pass:hudnavi2026release \
-              --key-pass pass:hudnavi2026release \
-              --v1-signing-enabled true \
-              --v2-signing-enabled true \
-              --out "$signed" \
-              "$aligned"
-            
-            # Step 3: verify
-            echo "Verifying $signed..."
-            $APKSIGNER verify --verbose --print-certs "$signed" 2>&1 | head -10
-            
-            # Clean up aligned temp file
-            rm -f "$aligned"
+            echo "--- $(basename $apk) ---"
+            $APKSIGNER verify --verbose --print-certs "$apk" 2>&1
+            echo ""
           done
-          
-          echo "=== Final signed APKs ==="
-          ls -la app/build/outputs/apk/release-aligned/
 
       - name: Get version name
         id: version
@@ -162,7 +103,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: hud-navi-release
-          path: app/build/outputs/apk/release-aligned/*.apk
+          path: app/build/outputs/apk/release/*-release.apk
 
       - name: Create GitHub Release
         if: github.ref == 'refs/heads/main' && github.event_name == 'push' || github.event_name == 'workflow_dispatch'
@@ -176,14 +117,14 @@ jobs:
             Lightweight HUD navigation app for Android.
             
             - Custom app icon
-            - Signed release APK
+            - Signed release APK (V1+V2+V3)
             - OpenStreetMap data attribution
             - Mirror mode for windshield HUD projection
             - **语音唤醒词识别** (哈德/你好小哈/小哈/哈德哈德)
             
             Commit: `${{ github.sha }}`
           files: |
-            app/build/outputs/apk/release-aligned/*.apk
+            app/build/outputs/apk/release/*-release.apk
             app/build/outputs/apk/debug/*.apk
           draft: false
           prerelease: false

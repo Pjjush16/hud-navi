@@ -25,7 +25,7 @@ import android.view.View
 import kotlin.math.*
 
 /**
- * hud-navi v10.23 — 逐段哈希 + 增量 diff 更新
+ * hud-navi v10.24 — 逐段哈希 + 增量 diff 更新
  *
  * v10.23 变更：
  * - 每条路网段独立 SHA-256 哈希，不再整图哈希
