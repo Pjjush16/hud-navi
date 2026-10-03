@@ -114,36 +114,8 @@ jobs:
             dir=$(dirname "$apk")
             fixed="${dir}/${base}-fixed.apk"
             
-            # Python script: rebuild APK with native libs STORED + page-aligned
-            python3 << 'PYEOF' "$apk" "$fixed"
-          import sys, zipfile, struct, shutil, os
-          
-          src_apk = sys.argv[1]
-          dst_apk = sys.argv[2]
-          PAGE_SIZE = 4096
-          
-          with zipfile.ZipFile(src_apk, 'r') as zin:
-              with zipfile.ZipFile(dst_apk, 'w', zipfile.ZIP_STORED) as zout:
-                  for item in zin.infolist():
-                      data = zin.read(item.filename)
-                      
-                      if item.filename.startswith('lib/') and item.filename.endswith('.so'):
-                          # Native lib: write as STORED (uncompressed)
-                          new_item = zipfile.ZipInfo(item.filename, zipfile.ZIP_STORED)
-                          new_item.compress_size = len(data)
-                          new_item.file_size = len(data)
-                          new_item.create_system = 0
-                          new_item.external_attr = item.external_attr
-                          zout.writestr(new_item, data)
-                      else:
-                          # Keep original compression
-                          new_item = zipfile.ZipInfo(item.filename, item.compress_type)
-                          new_item.external_attr = item.external_attr
-                          new_item.create_system = item.create_system
-                          zout.writestr(new_item, data)
-          
-          print(f"  Rebuilt: {os.path.basename(src_apk)} -> STORED native libs")
-          PYEOF
+            # Python script: rebuild APK with native libs STORED (uncompressed)
+            python3 scripts/fix_native_libs.py "$apk" "$fixed"
             
             # Now zipalign for page alignment of stored entries
             aligned="${dir}/${base}-aligned.apk"

@@ -11,8 +11,8 @@ android {
         applicationId = "com.hud.navi"
         minSdk = 21
         targetSdk = 34
-        versionCode = 79
-        versionName = "10.28"
+        versionCode = 80
+        versionName = "10.29"
     }
 
     // ABI 分包：输出 arm64-v8a / armeabi-v7a / universal 三个 APK
