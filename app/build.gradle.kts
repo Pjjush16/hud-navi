@@ -11,8 +11,8 @@ android {
         applicationId = "com.hud.navi"
         minSdk = 21
         targetSdk = 34
-        versionCode = 76
-        versionName = "10.25"
+        versionCode = 77
+        versionName = "10.26"
     }
 
     // ABI 分包：输出 arm64-v8a / armeabi-v7a / universal 三个 APK
@@ -22,6 +22,14 @@ android {
             reset()
             include("arm64-v8a", "armeabi-v7a")
             isUniversalApk = true
+        }
+    }
+
+    // 强制原生库以 STORED 模式打包 + 页对齐（修复安装失败）
+    // sherpa-onnx AAR 中的 .so 默认被 deflated 压缩，导致 Android 安装器无法 mmap
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
         }
     }
 

@@ -76,6 +76,35 @@ jobs:
       - name: Build Signed Release APK
         run: ./gradlew assembleRelease
 
+      - name: Zipalign and re-sign Release APKs (native lib page alignment)
+        run: |
+          ZIPALIGN=$(find $ANDROID_HOME/build-tools -name zipalign | sort -V | tail -1)
+          APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -1)
+          echo "=== Re-aligning release APKs for native lib page alignment ==="
+          for apk in app/build/outputs/apk/release/*-release.apk; do
+            [ -f "$apk" ] || continue
+            base=$(basename "$apk" .apk)
+            dir=$(dirname "$apk")
+            aligned="${dir}/${base}-aligned.apk"
+            
+            # zipalign -p 4: align native libs on 4KB page boundaries
+            $ZIPALIGN -v -p 4 "$apk" "$aligned"
+            
+            # Re-sign after zipalign (zipalign invalidates signatures)
+            $APKSIGNER sign \
+              --ks keystore/hud-navi-release.jks \
+              --ks-pass pass:hudnavi2026release \
+              --ks-key-alias hud-navi \
+              --key-pass pass:hudnavi2026release \
+              --v2-signing-enabled true \
+              --v3-signing-enabled true \
+              "$aligned"
+            
+            # Replace original with aligned version
+            mv "$aligned" "$apk"
+            echo "✅ Aligned and re-signed: $(basename $apk)"
+          done
+
       - name: Verify Release APK signature
         run: |
           APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -1)
