@@ -102,21 +102,54 @@ jobs:
       - name: Build Signed Release APK
         run: ./gradlew assembleRelease
 
-      - name: Zipalign and re-sign Release APKs (native lib page alignment)
+      - name: Re-align and re-sign Release APKs (native lib STORED + page alignment)
         run: |
           ZIPALIGN=$(find $ANDROID_HOME/build-tools -name zipalign | sort -V | tail -1)
           APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -1)
-          echo "=== Re-aligning release APKs for native lib page alignment ==="
+          
+          echo "=== Fixing native lib compression and page alignment ==="
           for apk in app/build/outputs/apk/release/*-release.apk; do
             [ -f "$apk" ] || continue
             base=$(basename "$apk" .apk)
             dir=$(dirname "$apk")
+            fixed="${dir}/${base}-fixed.apk"
+            
+            # Python script: rebuild APK with native libs STORED + page-aligned
+            python3 << 'PYEOF' "$apk" "$fixed"
+          import sys, zipfile, struct, shutil, os
+          
+          src_apk = sys.argv[1]
+          dst_apk = sys.argv[2]
+          PAGE_SIZE = 4096
+          
+          with zipfile.ZipFile(src_apk, 'r') as zin:
+              with zipfile.ZipFile(dst_apk, 'w', zipfile.ZIP_STORED) as zout:
+                  for item in zin.infolist():
+                      data = zin.read(item.filename)
+                      
+                      if item.filename.startswith('lib/') and item.filename.endswith('.so'):
+                          # Native lib: write as STORED (uncompressed)
+                          new_item = zipfile.ZipInfo(item.filename, zipfile.ZIP_STORED)
+                          new_item.compress_size = len(data)
+                          new_item.file_size = len(data)
+                          new_item.create_system = 0
+                          new_item.external_attr = item.external_attr
+                          zout.writestr(new_item, data)
+                      else:
+                          # Keep original compression
+                          new_item = zipfile.ZipInfo(item.filename, item.compress_type)
+                          new_item.external_attr = item.external_attr
+                          new_item.create_system = item.create_system
+                          zout.writestr(new_item, data)
+          
+          print(f"  Rebuilt: {os.path.basename(src_apk)} -> STORED native libs")
+          PYEOF
+            
+            # Now zipalign for page alignment of stored entries
             aligned="${dir}/${base}-aligned.apk"
+            $ZIPALIGN -v -p 4 "$fixed" "$aligned"
             
-            # zipalign -p 4: align native libs on 4KB page boundaries
-            $ZIPALIGN -v -p 4 "$apk" "$aligned"
-            
-            # Re-sign after zipalign (zipalign invalidates signatures)
+            # Re-sign
             $APKSIGNER sign \
               --ks keystore/hud-navi-release.jks \
               --ks-pass pass:hudnavi2026release \
@@ -126,9 +159,10 @@ jobs:
               --v3-signing-enabled true \
               "$aligned"
             
-            # Replace original with aligned version
+            # Replace original
             mv "$aligned" "$apk"
-            echo "✅ Aligned and re-signed: $(basename $apk)"
+            rm -f "$fixed"
+            echo "✅ Fixed, aligned and re-signed: $(basename $apk)"
           done
 
       - name: Verify Release APK signature
