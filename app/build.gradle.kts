@@ -11,8 +11,8 @@ android {
         applicationId = "com.hud.navi"
         minSdk = 21
         targetSdk = 34
-        versionCode = 90
-        versionName = "12.5"
+        versionCode = 91
+        versionName = "12.6"
     }
 
     // ABI 分包

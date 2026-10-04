@@ -47,7 +47,6 @@ class HudView @JvmOverloads constructor(
     var vehicleLng: Double = 0.0
     var vehicleBearing: Float = 0f
     var vehicleSpeed: Float = 0f     // km/h
-    var statusText: String = "等待 GPS..."
 
     // === HUD 镜像（垂直翻转，用于挡风玻璃投影） ===
     var mirrorEnabled: Boolean = true  // 默认开启镜像
@@ -176,21 +175,10 @@ class HudView @JvmOverloads constructor(
             canvas.restore()
         }
 
-        // OSM 归属标注（ODbL 协议要求，始终在视觉底部）
-        drawAttribution(canvas, w, h)
+        // 纯净模式：仅路网 + 车标 + 时速，无额外文字
     }
 
-    private fun drawAttribution(canvas: Canvas, w: Float, h: Float) {
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#44FFFFFF")
-            textSize = 22f
-            textAlign = Paint.Align.CENTER
-            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
-        }
-        // 镜像时视觉底部 = canvas y=0 附近；非镜像 = canvas y=h 附近
-        val attrY = if (mirrorEnabled) 24f else h - 8f
-        canvas.drawText("© OpenStreetMap contributors", w / 2f, attrY, paint)
-    }
+    // drawAttribution 已移除 — 纯净模式：仅路网 + 车标 + 时速
 
     private fun drawRoadNetwork(canvas: Canvas, w: Float, h: Float, metersPerPixel: Double) {
         // 车永远在屏幕中心，路网以车辆位置为中心绘制

@@ -535,7 +535,6 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 startLocationUpdates()
             } else {
                 permDeniedLayout.visibility = View.VISIBLE
-                hudView.statusText = "需要定位权限"
             }
         }
     }
@@ -778,12 +777,6 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         hudView.vehicleBearing = vehicleBearing
         hudView.vehicleSpeed = (ekf.speed * 3.6).toFloat()
 
-        val sensors = buildString {
-            append("GPS")
-            if (hasGyro) append("+Gyro")
-            if (hasRotationVector) append("+RV")
-        }
-        hudView.statusText = "${ekf.getStatusString()} [$sensors]"
         hudView.invalidate()
     }
 
