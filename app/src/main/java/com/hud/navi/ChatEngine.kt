@@ -246,11 +246,12 @@ class ChatEngine(
             return
         }
 
-        // 否则用聊天模式重新生成回复
+        // 否则用聊天模式重新生成回复（云端 API）
         speak("让我想想...")
         Thread {
-            // TODO: 传入用户原始文本
-            val reply = intentClassifier.chat("用户刚才说的话")
+            val reply = kotlinx.coroutines.runBlocking {
+                intentClassifier.chat(result.rawText)
+            }
             val ttsText = truncateForTts(reply)
             speak(ttsText)
             callback?.invoke(ttsText)

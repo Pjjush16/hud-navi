@@ -1,13 +1,11 @@
 /*
- * VoicePipeline.kt - 语音交互管线编排器 (v11.3 双版本)
+ * VoicePipeline.kt - 语音交互管线编排器 (v12.0 云端版)
  *
  * 完整语音管线：
  *   唤醒词(sherpa-onnx KWS) → "我在"反馈 → 录音(ASR) → 意图分类 → 执行 + TTS
  *
- * full 版：意图分类使用本地 Qwen2.5-0.5B (MNN-LLM) 语义理解
- * lite 版：意图分类使用关键词匹配（固定指令集）
- *
- * 由 BuildConfig.IS_LLM_ENABLED 控制，IntentClassifier 内部自动切换
+ * 意图分类使用智谱 AI 云端 API（免费模型 glm-4.7-flash）
+ * API 不可用时自动降级到关键词匹配
  */
 
 package com.hud.navi
@@ -18,27 +16,16 @@ import android.os.Looper
 import android.util.Log
 import kotlinx.coroutines.*
 
-/**
- * 语音管线状态
- */
 enum class PipelineState {
-    IDLE,           // 等待唤醒词
-    WAKE_DETECTED,  // 唤醒词已检测，准备录音
-    LISTENING,      // 正在录音
-    PROCESSING,     // ASR + 意图分类处理中
-    SPEAKING,       // TTS 播报中
-    ERROR           // 错误状态
+    IDLE, WAKE_DETECTED, LISTENING, PROCESSING, SPEAKING, ERROR
 }
 
-/**
- * 语音管线事件回调
- */
 interface VoicePipelineCallback {
     fun onStateChanged(state: PipelineState)
     fun onWakeDetected(keyword: String)
     fun onAsrResult(text: String, isFinal: Boolean)
     fun onIntentResult(result: IntentResult)
-    fun onUiCommand(command: String)  // 传给 MainActivity 的 UI 指令
+    fun onUiCommand(command: String)
     fun onChatResponse(text: String)
     fun onError(message: String)
 }
@@ -54,7 +41,6 @@ class VoicePipeline(
     private val handler = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
-    // 子模块
     private var wakeWordManager: WakeWordManager? = null
     private var voiceCommandManager: VoiceCommandManager? = null
     private var intentClassifier: IntentClassifier? = null
@@ -73,16 +59,6 @@ class VoicePipeline(
     var initError: String? = null
         private set
 
-    /**
-     * 初始化所有子模块
-     *
-     * 初始化顺序：
-     * 1. WakeWordManager（唤醒词检测）
-     * 2. IntentClassifier（LLM 或关键词，由 BuildConfig 决定）
-     * 3. WebSearchClient（搜索引擎）
-     * 4. ChatEngine（TTS）
-     * 5. VoiceCommandManager（ASR）
-     */
     fun init() {
         Log.i(TAG, "Initializing voice pipeline...")
         val errors = mutableListOf<String>()
@@ -100,13 +76,10 @@ class VoicePipeline(
             errors.add("唤醒词: ${e.message}")
         }
 
-        // 2. 意图分类器（LLM full版 / 关键词 lite版）
+        // 2. 意图分类器（智谱 API + 关键词降级）
         try {
             intentClassifier = IntentClassifier(context)
-            scope.launch(Dispatchers.IO) {
-                intentClassifier?.checkAvailability()
-                Log.i(TAG, "IntentClassifier ready, mode: ${intentClassifier?.mode ?: "unknown"}")
-            }
+            Log.i(TAG, "IntentClassifier mode: ${intentClassifier?.mode ?: "unknown"}")
         } catch (e: Exception) {
             errors.add("意图分类: ${e.message}")
         }
@@ -145,16 +118,13 @@ class VoicePipeline(
 
         pipelineReady = true
         state = PipelineState.IDLE
-        Log.i(TAG, "Pipeline initialized. Wake=${wakeWordManager?.isReady()}, ASR=${voiceCommandManager != null}")
+        Log.i(TAG, "Pipeline initialized. Wake=${wakeWordManager?.isReady()}, mode=${intentClassifier?.mode}")
     }
 
     fun start() {
         if (wakeWordManager?.isReady() == true) {
             wakeWordManager?.start()
             state = PipelineState.IDLE
-            Log.i(TAG, "Pipeline started, listening for wake word")
-        } else {
-            Log.w(TAG, "Cannot start: wake word not ready")
         }
     }
 
@@ -171,76 +141,46 @@ class VoicePipeline(
         chatEngine?.release()
         intentClassifier?.release()
         scope.cancel()
-        Log.i(TAG, "Pipeline released")
     }
 
-    // ==================== 管线流程 ====================
-
     private fun onWakeDetected(keyword: String) {
-        Log.i(TAG, "Wake detected: $keyword")
+        Log.i(TAG, "Wake: $keyword")
         state = PipelineState.WAKE_DETECTED
         callback.onWakeDetected(keyword)
-
-        handler.postDelayed({
-            startListening()
-        }, 300)
+        handler.postDelayed({ startListening() }, 300)
     }
 
     private fun startListening() {
         state = PipelineState.LISTENING
         voiceCommandManager?.startListening()
-        Log.i(TAG, "Listening for command...")
     }
 
     private fun onAsrResult(text: String, isFinal: Boolean) {
         callback.onAsrResult(text, isFinal)
-
         if (isFinal) {
             if (text.isBlank()) {
-                Log.w(TAG, "Empty ASR result")
                 chatEngine?.speak("我没有听清，请再说一次")
                 state = PipelineState.IDLE
                 return
             }
-
             state = PipelineState.PROCESSING
-            Log.i(TAG, "Final ASR: $text, processing...")
-
-            scope.launch(Dispatchers.IO) {
-                processIntent(text)
-            }
+            scope.launch(Dispatchers.IO) { processIntent(text) }
         }
     }
 
-    /**
-     * 意图分类 + 执行
-     * IntentClassifier 内部自动选择 LLM 或关键词模式
-     */
     private suspend fun processIntent(userText: String) {
         try {
-            val classifier = intentClassifier ?: run {
-                Log.w(TAG, "Classifier null, fallback")
-                handler.post {
-                    callback.onIntentResult(IntentResult.fallback(userText))
-                    state = PipelineState.SPEAKING
-                    chatEngine?.speak("抱歉，语音助手暂时不可用。")
-                }
-                return
-            }
-
-            // 分类意图（LLM 或关键词，由 classifier 内部决定）
+            val classifier = intentClassifier ?: return
             val result = classifier.classify(userText)
-
             Log.i(TAG, "Intent: ${result.intent}/${result.action} (mode: ${classifier.mode})")
             handler.post { callback.onIntentResult(result) }
 
-            // 执行动作
             withContext(Dispatchers.Main) {
                 state = PipelineState.SPEAKING
                 executeIntent(result)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Process intent failed: ${e.message}", e)
+            Log.e(TAG, "Process failed: ${e.message}", e)
             handler.post {
                 callback.onError("处理失败: ${e.message}")
                 state = PipelineState.IDLE
@@ -250,23 +190,12 @@ class VoicePipeline(
 
     private fun executeIntent(result: IntentResult) {
         val chatEng = chatEngine ?: return
-
         chatEng.handleIntent(result) { uiCommand ->
             handler.post { callback.onUiCommand(uiCommand) }
         }
-
         chatEng.setOnTtsDoneListener {
-            handler.post {
-                state = PipelineState.IDLE
-                Log.i(TAG, "TTS done, back to idle")
-            }
+            handler.post { state = PipelineState.IDLE }
         }
-
-        // 兜底：5秒后回到 IDLE
-        handler.postDelayed({
-            if (state == PipelineState.SPEAKING) {
-                state = PipelineState.IDLE
-            }
-        }, 5000)
+        handler.postDelayed({ if (state == PipelineState.SPEAKING) state = PipelineState.IDLE }, 5000)
     }
 }

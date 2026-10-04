@@ -11,104 +11,17 @@ on:
         description: 'Git ref (tag/branch/commit) to build'
         required: false
         default: 'main'
-      flavor:
-        description: 'Build flavor: lite, full, or both'
-        required: false
-        default: 'both'
-        type: choice
-        options:
-          - both
-          - lite
-          - full
 
 permissions:
   contents: write
 
 env:
   SHERPA_ONNX_VERSION: "1.13.8"
-  MNN_MODEL_NAME: "Qwen2.5-0.5B-Instruct-MNN"
-  MNN_MODEL_SOURCE: "https://modelscope.cn/models/MNN/Qwen2.5-0.5B-Instruct-MNN/resolve/master"
-  MNN_MODEL_SOURCE_HF: "https://huggingface.co/taobao-mnn/Qwen2.5-0.5B-Instruct-MNN/resolve/main"
 
 jobs:
-  # ============================================================
-  # Job 1: 编译 MNN-LLM 原生库 (arm64-v8a) — 仅 full 版需要
-  # ============================================================
-  build-mnn-native:
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.flavor == 'both' || inputs.flavor == 'full'))
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-
-    steps:
-      - name: Cache MNN native libs
-        id: cache-mnn
-        uses: actions/cache@v4
-        with:
-          path: mnn-libs/
-          key: mnn-native-${{ runner.os }}-v2
-
-      - name: Checkout MNN source (if cache miss)
-        if: steps.cache-mnn.outputs.cache-hit != 'true'
-        uses: actions/checkout@v4
-        with:
-          repository: alibaba/MNN
-          path: mnn-source
-          submodules: recursive
-
-      - name: Install NDK (if cache miss)
-        if: steps.cache-mnn.outputs.cache-hit != 'true'
-        uses: nttld/setup-ndk@v1
-        id: setup-ndk
-        with:
-          ndk-version: r27c
-          add-to-path: false
-
-      - name: Build MNN-LLM for arm64-v8a (if cache miss)
-        if: steps.cache-mnn.outputs.cache-hit != 'true'
-        env:
-          ANDROID_NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: |
-          cd mnn-source/project/android
-          mkdir -p build_64 && cd build_64
-          bash ../build_64.sh \
-            "-DMNN_LOW_MEMORY=true \
-             -DMNN_CPU_WEIGHT_DEQUANT_GEMM=true \
-             -DMNN_BUILD_LLM=true \
-             -DMNN_SUPPORT_TRANSFORMER_FUSE=true \
-             -DMNN_ARM82=true \
-             -DMNN_USE_LOGCAT=true \
-             -DMNN_OPENCL=true \
-             -DMNN_SEP_BUILD=OFF \
-             -DCMAKE_INSTALL_PREFIX=."
-          make install
-
-          mkdir -p $GITHUB_WORKSPACE/mnn-libs/arm64-v8a
-          mkdir -p $GITHUB_WORKSPACE/mnn-libs/include
-          find . -name "*.so" -exec cp {} $GITHUB_WORKSPACE/mnn-libs/arm64-v8a/ \;
-          cp -r $GITHUB_WORKSPACE/mnn-source/include/* $GITHUB_WORKSPACE/mnn-libs/include/ 2>/dev/null || true
-          mkdir -p $GITHUB_WORKSPACE/mnn-libs/include/tools
-          cp -r $GITHUB_WORKSPACE/mnn-source/tools/llm $GITHUB_WORKSPACE/mnn-libs/include/tools/ 2>/dev/null || true
-
-          echo "=== Built libraries ==="
-          ls -lah $GITHUB_WORKSPACE/mnn-libs/arm64-v8a/
-          du -sh $GITHUB_WORKSPACE/mnn-libs/
-
-      - name: Upload MNN artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: mnn-native-arm64
-          path: mnn-libs/
-          retention-days: 7
-
-  # ============================================================
-  # Job 2: 构建 Lite APK（关键词识别，无 LLM，~10MB）
-  # ============================================================
-  build-lite:
-    if: always() && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.flavor == 'both' || inputs.flavor == 'lite')))
-    needs: [build-mnn-native]
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
     steps:
       - uses: actions/checkout@v4
         with:
@@ -137,7 +50,7 @@ jobs:
           done
           cd /tmp/sherpa-aar-extract && rm -rf jni/ && zip -qr /tmp/sherpa-onnx-nojni.aar . && cd -
           cp /tmp/sherpa-onnx-nojni.aar app/libs/sherpa-onnx.aar
-          echo "sherpa-onnx SDK installed (lite: no MNN libs)"
+          echo "sherpa-onnx SDK installed"
 
       - name: Download KWS Model
         run: |
@@ -151,18 +64,20 @@ jobs:
             cp /tmp/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/decoder-epoch-12-avg-2-chunk-16-left-64.onnx "$MODEL_DIR/"
             cp /tmp/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx "$MODEL_DIR/"
           fi
-          echo "=== Lite assets (no LLM model) ==="
+          echo "=== Assets ==="
           du -sh app/src/main/assets/
 
-      - name: Build Lite APKs
-        run: |
-          ./gradlew assembleLiteDebug assembleLiteRelease
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug
 
-      - name: Re-sign Lite Release APKs
+      - name: Build Signed Release APK
+        run: ./gradlew assembleRelease
+
+      - name: Re-sign Release APKs
         run: |
           ZIPALIGN=$(find $ANDROID_HOME/build-tools -name zipalign | sort -V | tail -1)
           APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -1)
-          for apk in app/build/outputs/apk/lite/release/*-release.apk; do
+          for apk in app/build/outputs/apk/release/*-release.apk; do
             [ -f "$apk" ] || continue
             base=$(basename "$apk" .apk)
             dir=$(dirname "$apk")
@@ -178,163 +93,17 @@ jobs:
               --v2-signing-enabled true --v3-signing-enabled true \
               "$aligned"
             mv "$aligned" "$apk" && rm -f "$fixed"
-            echo "✅ Lite: $(basename $apk) — $(du -sh "$apk" | cut -f1)"
+            echo "✅ $(basename $apk) — $(du -sh "$apk" | cut -f1)"
           done
 
-      - name: Upload Lite APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: hud-navi-lite
-          path: |
-            app/build/outputs/apk/lite/release/*-release.apk
-            app/build/outputs/apk/lite/debug/*.apk
-
-  # ============================================================
-  # Job 3: 构建 Full APK（本地 LLM，~365MB）
-  # ============================================================
-  build-full:
-    if: always() && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.flavor == 'both' || inputs.flavor == 'full')))
-    needs: [build-mnn-native]
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
-
-      - name: Download sherpa-onnx SDK
+      - name: Verify Release APK
         run: |
-          mkdir -p app/libs
-          wget -q "https://github.com/k2-fsa/sherpa-onnx/releases/download/v${{ env.SHERPA_ONNX_VERSION }}/sherpa-onnx-${{ env.SHERPA_ONNX_VERSION }}.aar" -O /tmp/sherpa-onnx.aar
-          mkdir -p /tmp/sherpa-aar-extract
-          unzip -qo /tmp/sherpa-onnx.aar -d /tmp/sherpa-aar-extract
-          for arch in arm64-v8a armeabi-v7a; do
-            if [ -d "/tmp/sherpa-aar-extract/jni/$arch" ]; then
-              mkdir -p "app/src/main/jniLibs/$arch"
-              cp /tmp/sherpa-aar-extract/jni/$arch/*.so "app/src/main/jniLibs/$arch/"
-            fi
-          done
-          cd /tmp/sherpa-aar-extract && rm -rf jni/ && zip -qr /tmp/sherpa-onnx-nojni.aar . && cd -
-          cp /tmp/sherpa-onnx-nojni.aar app/libs/sherpa-onnx.aar
-
-      - name: Download MNN native libs
-        uses: actions/download-artifact@v4
-        with:
-          name: mnn-native-arm64
-          path: mnn-libs/
-
-      - name: Install MNN .so into jniLibs
-        run: |
-          mkdir -p app/src/main/jniLibs/arm64-v8a
-          cp mnn-libs/arm64-v8a/*.so app/src/main/jniLibs/arm64-v8a/
-          echo "=== MNN libs installed ==="
-          ls -lah app/src/main/jniLibs/arm64-v8a/
-
-      - name: Download Qwen2.5-0.5B MNN model
-        run: |
-          MODEL_DIR="app/src/main/assets/llm"
-          mkdir -p "$MODEL_DIR"
-          echo "Downloading ${{ env.MNN_MODEL_NAME }}..."
-
-          download_file() {
-            local filename="$1"
-            local target="$MODEL_DIR/$filename"
-            [ -f "$target" ] && [ -s "$target" ] && return 0
-            wget -q --timeout=60 "${{ env.MNN_MODEL_SOURCE }}/$filename" -O "$target" 2>/dev/null && return 0
-            wget -q --timeout=60 "${{ env.MNN_MODEL_SOURCE_HF }}/$filename" -O "$target" 2>/dev/null && return 0
-            rm -f "$target"
-            return 1
-          }
-
-          for f in config.json config.yaml weight.mnn tokenizer.json tokenizer_config.json special_tokens_map.json; do
-            download_file "$f" || true
-          done
-          for f in tokenizer.model merges.txt vocab.json; do
-            download_file "$f" || true
-          done
-
-          if [ ! -f "$MODEL_DIR/config.json" ]; then
-            echo "ERROR: config.json not found!"
-            exit 1
-          fi
-          echo "=== Full assets ==="
-          du -sh app/src/main/assets/
-
-      - name: Download KWS Model
-        run: |
-          MODEL_DIR="app/src/main/assets/kws"
-          mkdir -p "$MODEL_DIR"
-          if [ ! -f "$MODEL_DIR/tokens.txt" ]; then
-            wget -q "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile.tar.bz2" -O /tmp/kws-model.tar.bz2
-            tar xjf /tmp/kws-model.tar.bz2 -C /tmp/
-            cp /tmp/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/tokens.txt "$MODEL_DIR/"
-            cp /tmp/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx "$MODEL_DIR/"
-            cp /tmp/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/decoder-epoch-12-avg-2-chunk-16-left-64.onnx "$MODEL_DIR/"
-            cp /tmp/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx "$MODEL_DIR/"
-          fi
-
-      - name: Build Full APKs
-        run: |
-          ./gradlew assembleFullDebug assembleFullRelease
-
-      - name: Re-sign Full Release APKs
-        run: |
-          ZIPALIGN=$(find $ANDROID_HOME/build-tools -name zipalign | sort -V | tail -1)
           APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -1)
-          for apk in app/build/outputs/apk/full/release/*-release.apk; do
+          for apk in app/build/outputs/apk/release/*-release.apk; do
             [ -f "$apk" ] || continue
-            base=$(basename "$apk" .apk)
-            dir=$(dirname "$apk")
-            fixed="${dir}/${base}-fixed.apk"
-            python3 scripts/fix_native_libs.py "$apk" "$fixed"
-            aligned="${dir}/${base}-aligned.apk"
-            $ZIPALIGN -v -p 4 "$fixed" "$aligned"
-            $APKSIGNER sign \
-              --ks keystore/hud-navi-release.jks \
-              --ks-pass pass:hudnavi2026release \
-              --ks-key-alias hud-navi \
-              --key-pass pass:hudnavi2026release \
-              --v2-signing-enabled true --v3-signing-enabled true \
-              "$aligned"
-            mv "$aligned" "$apk" && rm -f "$fixed"
-            echo "✅ Full: $(basename $apk) — $(du -sh "$apk" | cut -f1)"
+            echo "--- $(basename $apk) ---"
+            $APKSIGNER verify --verbose --print-certs "$apk" 2>&1
           done
-
-      - name: Upload Full APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: hud-navi-full
-          path: |
-            app/build/outputs/apk/full/release/*-release.apk
-            app/build/outputs/apk/full/debug/*.apk
-
-  # ============================================================
-  # Job 4: 创建 GitHub Release（包含两个版本的 APK）
-  # ============================================================
-  release:
-    needs: [build-lite, build-full]
-    if: always() && (needs.build-lite.result == 'success' || needs.build-full.result == 'success') && (github.ref == 'refs/heads/main' && github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts/
 
       - name: Get version name
         id: version
@@ -342,14 +111,16 @@ jobs:
           VERSION=$(grep 'versionName' app/build.gradle.kts | head -1 | sed 's/.*"\(.*\)".*/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Collect APKs
-        run: |
-          mkdir -p release-apks
-          find artifacts/ -name "*.apk" -exec cp {} release-apks/ \;
-          echo "=== Release APKs ==="
-          ls -lah release-apks/
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: hud-navi-apks
+          path: |
+            app/build/outputs/apk/release/*-release.apk
+            app/build/outputs/apk/debug/*.apk
 
       - name: Create GitHub Release
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || format('v{0}', steps.version.outputs.version) }}
@@ -359,32 +130,25 @@ jobs:
 
             Lightweight HUD navigation app for Android.
 
-            ## 两个版本
-
-            | 版本 | 说明 | 大小 |
-            |------|------|------|
-            | **lite** | 关键词指令识别（固定命令集），无需下载模型 | ~10MB |
-            | **full** | 本地 LLM 语义理解（Qwen2.5-0.5B），自由聊天 + 搜索 | ~365MB |
-
-            ### 共同功能
-            - 🗣️ 语音唤醒词识别（哈德/小哈/你好小哈/哈德哈德）
-            - 🗺️ HUD 导航 + 路网渲染 + HMM 地图匹配
+            **v12.0 云端 AI 语音助手：**
+            - 🗣️ 唤醒词识别（哈德/小哈/你好小哈）
+            - 🧠 智谱 AI 云端语义理解（免费模型 GLM-4.7-Flash）
             - 🔍 联网搜索（SearXNG + Bing 双引擎）
-            - 🪞 镜像翻转（挡风玻璃投影）
-            - 🔊 TTS 语音回复
+            - 💬 自由聊天 + TTS 语音回复
+            - 📋 OOBE 首次配置页面（填 API Key + 选模型）
+            - ⚡ APK 仅 ~10MB，无本地大模型
 
-            ### Lite 版指令集
-            - "导航去XX" / "附近的加油站"
-            - "搜索XX" / "帮我查一下XX"
-            - "开/关镜像" / "切换镜像"
-            - "播放音乐" / "暂停" / "下一首"
+            **使用方式：**
+            1. 安装后首次启动进入配置页面
+            2. 注册 bigmodel.cn 获取免费 API Key
+            3. 选择模型（推荐 GLM-4.7-Flash 免费）
+            4. 开始使用语音助手
 
-            ### Full 版额外能力
-            - 🧠 本地 Qwen2.5-0.5B 语义理解（MNN-LLM 引擎）
-            - 💬 自由聊天 + TTS 语音播报
-            - 自然语言指令（怎么说都能理解）
+            跳过配置也可使用，仅支持关键词指令模式。
 
             Commit: `${{ github.sha }}`
-          files: release-apks/*.apk
+          files: |
+            app/build/outputs/apk/release/*-release.apk
+            app/build/outputs/apk/debug/*.apk
           draft: false
           prerelease: false

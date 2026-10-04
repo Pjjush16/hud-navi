@@ -11,30 +11,11 @@ android {
         applicationId = "com.hud.navi"
         minSdk = 21
         targetSdk = 34
-        versionCode = 84
-        versionName = "11.3"
+        versionCode = 85
+        versionName = "12.0"
     }
 
-    // ========== 双版本：lite（关键词识别）+ full（本地LLM） ==========
-    flavorDimensions += "model"
-
-    productFlavors {
-        create("lite") {
-            dimension = "model"
-            applicationIdSuffix = ".lite"
-            versionNameSuffix = "-lite"
-            buildConfigField("boolean", "IS_LLM_ENABLED", "false")
-            resValue("string", "app_name", "HUD 导航 Lite")
-        }
-        create("full") {
-            dimension = "model"
-            versionNameSuffix = "-full"
-            buildConfigField("boolean", "IS_LLM_ENABLED", "true")
-            resValue("string", "app_name", "HUD 导航")
-        }
-    }
-
-    // ABI 分包：输出 arm64-v8a / armeabi-v7a / universal 三个 APK
+    // ABI 分包
     splits {
         abi {
             isEnable = true
@@ -44,7 +25,6 @@ android {
         }
     }
 
-    // 强制原生库以 STORED 模式打包 + 页对齐（修复安装失败）
     packaging {
         jniLibs {
             useLegacyPackaging = true
@@ -79,23 +59,6 @@ android {
     }
     kotlinOptions {
         jvmTarget = "17"
-    }
-}
-
-// ========== Lite 版本：排除 LLM 模型资源（MNN .so 本身不在 lite 构建中） ==========
-android.applicationVariants.all {
-    val variant = this
-    if (variant.flavorName == "lite") {
-        variant.mergeAssetsProvider.configure {
-            doLast {
-                val assetsDir = outputDir.get().asFile
-                val llmDir = File(assetsDir, "llm")
-                if (llmDir.exists()) {
-                    llmDir.deleteRecursively()
-                    logger.lifecycle("Lite: removed assets/llm/")
-                }
-            }
-        }
     }
 }
 

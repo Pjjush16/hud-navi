@@ -25,15 +25,24 @@
             android:foregroundServiceType="location"
             android:exported="false" />
 
+        <!-- OOBE 首次启动配置页面（Launcher） -->
         <activity
-            android:name=".MainActivity"
+            android:name=".SetupActivity"
             android:exported="true"
-            android:screenOrientation="landscape"
+            android:screenOrientation="portrait"
             android:configChanges="orientation|screenSize|keyboardHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 主界面（HUD 导航） -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="false"
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+
     </application>
 </manifest>
