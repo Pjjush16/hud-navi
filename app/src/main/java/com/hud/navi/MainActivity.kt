@@ -408,16 +408,16 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                         isProcessing = state == PipelineState.PROCESSING
                         isSpeaking = state == PipelineState.SPEAKING
 
-                        // 更新状态文本
-                        val stateText = when (state) {
-                            PipelineState.LISTENING -> "🎤 正在听..."
-                            PipelineState.PROCESSING -> "🧠 思考中..."
-                            PipelineState.SPEAKING -> "🔊 回复中..."
-                            else -> null
-                        }
-                        if (stateText != null) {
-                            wakeFeedbackKeyword.text = stateText
-                            wakeFeedback.visibility = View.VISIBLE
+                        when (state) {
+                            PipelineState.PROCESSING -> {
+                                wakeFeedbackKeyword.text = "思考中..."
+                                wakeFeedback.visibility = View.VISIBLE
+                            }
+                            PipelineState.IDLE -> {
+                                // 回到空闲时隐藏反馈面板
+                                hideWakeFeedback()
+                            }
+                            else -> {}
                         }
                     }
                 }
@@ -429,7 +429,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 override fun onAsrResult(text: String, isFinal: Boolean) {
                     handler.post {
                         if (text.isNotBlank()) {
-                            wakeFeedbackKeyword.text = if (isFinal) "📝 $text" else "💬 $text..."
+                            // 直接显示 ASR 识别出的文字，不加 emoji 前缀
+                            wakeFeedbackKeyword.text = text
+                            wakeFeedback.visibility = View.VISIBLE
                         }
                     }
                 }
@@ -444,7 +446,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
                 override fun onChatResponse(text: String) {
                     handler.post {
-                        wakeFeedbackKeyword.text = text.take(30)
+                        wakeFeedbackKeyword.text = text
                     }
                 }
 
@@ -490,12 +492,10 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 wakeFeedback.scaleY = 1f
             }
             command.startsWith("🔍") -> {
-                // 搜索中，显示搜索关键词
                 wakeFeedbackKeyword.text = command
             }
             else -> {
-                // 其他指令，显示文本
-                wakeFeedbackKeyword.text = command.take(30)
+                wakeFeedbackKeyword.text = command
             }
         }
     }

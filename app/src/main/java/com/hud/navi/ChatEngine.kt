@@ -240,21 +240,20 @@ class ChatEngine(
         // 如果模型已经生成了回复文本，直接播报
         val text = result.params["text"] as? String
         if (!text.isNullOrBlank()) {
-            val ttsText = truncateForTts(text)
-            speak(ttsText)
-            callback?.invoke(ttsText)
+            speak(truncateForTts(text))
+            callback?.invoke(text)  // UI 显示完整文本
             return
         }
 
         // 否则用聊天模式重新生成回复（云端 API）
+        callback?.invoke("让我想想...")
         speak("让我想想...")
         Thread {
             val reply = kotlinx.coroutines.runBlocking {
                 intentClassifier.chat(result.rawText)
             }
-            val ttsText = truncateForTts(reply)
-            speak(ttsText)
-            callback?.invoke(ttsText)
+            speak(truncateForTts(reply))
+            callback?.invoke(reply)  // UI 显示完整回复
         }.start()
     }
 
