@@ -1002,12 +1002,17 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             }
             .start()
 
-        // 2秒后自动收回
+        // 不再自动隐藏！面板在整个 唤醒→录音→处理→播报 流程中一直显示
+        // 仅在 PipelineState.IDLE 时由 state 回调触发 hideWakeFeedback()
+        // 安全兜底：30秒后强制隐藏（防止流程卡死）
         wakeFeedbackHideRunnable = Runnable { hideWakeFeedback() }
-        handler.postDelayed(wakeFeedbackHideRunnable!!, 2000)
+        handler.postDelayed(wakeFeedbackHideRunnable!!, 30000)
     }
 
     private fun hideWakeFeedback() {
+        wakeFeedbackHideRunnable?.let { handler.removeCallbacks(it) }
+        wakeFeedbackHideRunnable = null
+
         wakeFeedbackPanel.animate()
             .translationY(120f)
             .alpha(0f)

@@ -185,11 +185,13 @@ class WakeWordManager(
 
     fun stop() {
         running.set(false)
-        listenThread?.interrupt()
+        val thread = listenThread
         listenThread = null
         try { audioRecord?.stop() } catch (_: Exception) {}
         try { audioRecord?.release() } catch (_: Exception) {}
         audioRecord = null
+        // 等待线程结束，确保 AudioRecord 完全释放
+        try { thread?.join(500) } catch (_: Exception) {}
         Log.i(TAG, "Stopped")
     }
 
