@@ -72,11 +72,12 @@ class IntentClassifier(
 
     // MNN-LLM 原生引擎
     private val engine = MnnLlmEngine(context)
-    private val modelDownloader = ModelDownloader(context)
+    private val modelManager = ModelManager(context)
     private var isAvailable = false
 
     /**
-     * 检查 LLM 引擎是否可用（.so 已加载 + 模型已下载）
+     * 检查 LLM 引擎是否可用（.so 已加载 + 模型已就绪）
+     * 如果模型尚未从 assets 解压，会自动触发解压。
      */
     suspend fun checkAvailability(): Boolean {
         // 1. 检查原生库是否加载成功
@@ -86,16 +87,27 @@ class IntentClassifier(
             return false
         }
 
-        // 2. 检查模型是否已下载
-        if (!modelDownloader.isModelReady()) {
-            Log.w(TAG, "Model not downloaded yet")
-            isAvailable = false
-            return false
+        // 2. 检查模型是否已解压到内部存储，没有则从 assets 解压
+        if (!modelManager.isModelReady()) {
+            if (!modelManager.hasAssetsModel()) {
+                Log.w(TAG, "No model files in assets/llm/")
+                isAvailable = false
+                return false
+            }
+            Log.i(TAG, "Extracting model from assets...")
+            val extracted = withContext(Dispatchers.IO) {
+                modelManager.extractFromAssets()
+            }
+            if (!extracted) {
+                Log.e(TAG, "Model extraction failed")
+                isAvailable = false
+                return false
+            }
         }
 
         // 3. 初始化引擎（如果尚未初始化）
         if (!isAvailable) {
-            val modelDir = modelDownloader.getModelDir().absolutePath
+            val modelDir = modelManager.getModelDir().absolutePath
             isAvailable = engine.init(modelDir)
         }
 
