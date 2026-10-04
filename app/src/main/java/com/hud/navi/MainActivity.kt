@@ -914,6 +914,8 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 gyroHeadingRate = rawRate
                 gyroHeadingRateSmooth += GYRO_SMOOTH * (rawRate - gyroHeadingRateSmooth)
                 lastGyroTime = System.currentTimeMillis()
+                // v12.5: 陀螺仪角速度传给 EKF，GPS 丢失时用于短期航向积分
+                ekf.updateGyroRate(gyroHeadingRateSmooth)
             }
             Sensor.TYPE_ROTATION_VECTOR -> {
                 val rotMat = FloatArray(9)
@@ -927,6 +929,8 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                     val diff = ((rawHeading - rvHeadingSmooth + 540f) % 360f) - 180f
                     rvHeadingSmooth = ((rvHeadingSmooth + 0.15f * diff) + 360f) % 360f
                 }
+                // v12.5: 旋转矢量航向传给 EKF，低速时比纯罗盘稳定得多
+                ekf.updateRotationVector(rvHeadingSmooth)
             }
             Sensor.TYPE_LINEAR_ACCELERATION -> {
                 val R = FloatArray(9); val I = FloatArray(9)

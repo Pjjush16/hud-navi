@@ -123,8 +123,8 @@ class WakeWordManager(
                     provider = "cpu"
                 ),
                 keywordsFile = keywordsPath,
-                keywordsScore = 2.5f,    // 提高关键词权重，短词（哈德）更容易被识别
-                keywordsThreshold = 0.15f, // 降低阈值，提高灵敏度
+                keywordsScore = 3.0f,    // 提高关键词权重，短词（哈德）更容易被识别
+                keywordsThreshold = 0.08f, // 降低阈值，提高灵敏度（之前0.15太严格）
                 numTrailingBlanks = 1    // 减少尾随空白，加快响应速度
             )
 

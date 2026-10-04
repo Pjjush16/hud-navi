@@ -62,6 +62,18 @@ class EkfDeadReckoning {
     private var compassSmoothed = 0.0
     private var compassInitialized = false
 
+    // === 陀螺仪状态（v12.5 新增：终于用上了）===
+    var gyroRateDegPerSec = 0.0   // 偏航角速度（度/秒，正=右转）
+    private var gyroAvailable = false
+    private var lastGyroTimeMs = 0L
+
+    // === 旋转矢量状态（v12.5 新增：终于用上了）===
+    // 旋转矢量 = 加速度计+磁力计+陀螺仪 融合产出，比纯磁力计罗盘稳定得多
+    var rvBearing = 0.0           // 旋转矢量航向（度，0=北）
+    var rvAvailable = false
+    private var rvSmoothed = 0.0
+    private var rvInitialized = false
+
     // === 路网吸附状态（仅作为微调，不控制惯导激活） ===
     var snappedToRoad = false
     var roadHeadingDeg = 0.0
@@ -137,6 +149,40 @@ class EkfDeadReckoning {
     }
 
     /**
+     * v12.5: 更新陀螺仪偏航角速度
+     * 用于 GPS 丢失时的短期航向预测（陀螺仪积分）
+     * 陀螺仪优势：不受磁场干扰，短时间积分精度极高
+     */
+    fun updateGyroRate(rateDegPerSec: Float) {
+        gyroAvailable = true
+        lastGyroTimeMs = System.currentTimeMillis()
+        // EMA 平滑，避免抖动
+        gyroRateDegPerSec += 0.3 * (rateDegPerSec.toDouble() - gyroRateDegPerSec)
+    }
+
+    /**
+     * v12.5: 更新旋转矢量航向
+     * 旋转矢量是 Android 系统级融合（加速度计+磁力计+陀螺仪），
+     * 比纯磁力计罗盘稳定得多（抗磁干扰、抗倾斜）。
+     * 低速时的最佳航向源。
+     */
+    fun updateRotationVector(bearingDeg: Float) {
+        rvAvailable = true
+        if (!rvInitialized) {
+            rvSmoothed = bearingDeg.toDouble()
+            rvInitialized = true
+        } else {
+            var diff = bearingDeg.toDouble() - rvSmoothed
+            if (diff > 180) diff -= 360
+            if (diff < -180) diff += 360
+            rvSmoothed += 0.2 * diff  // EMA alpha=0.2，旋转矢量本身已经融合过，可以信任更多
+            if (rvSmoothed < 0) rvSmoothed += 360
+            if (rvSmoothed >= 360) rvSmoothed -= 360
+        }
+        rvBearing = rvSmoothed
+    }
+
+    /**
      * 预测步（Predict）— 每帧调用（16ms）
      *
      * v10.21 核心改进：加速度计零速检测（ZUPT）
@@ -173,20 +219,43 @@ class EkfDeadReckoning {
             isStationary = false
         }
 
-        // ── 确定有效航向 ──
-        // 高速时 GPS bearing 可靠，低速时用罗盘
+        // ── 确定有效航向（v12.5 五源融合）──
+        // 优先级：GPS bearing(高速) > 旋转矢量(低速) > 罗盘(低速) > 陀螺仪积分(GPS丢失) > 保持
         val speedKmh = speedMs * 3.6
+        val timeSinceGps = System.currentTimeMillis() - lastGpsTimeMs
+        val gpsLost = timeSinceGps > 2000
+        val gyroFresh = gyroAvailable && (System.currentTimeMillis() - lastGyroTimeMs < 500)
+
         val effectiveHeading = when {
-            speedKmh > 3.0 && gpsBearingDeg >= 0 -> gpsBearingDeg.toDouble()
+            // GPS 在线 + 速度够快 → GPS bearing（运动方向最可靠）
+            !gpsLost && speedKmh > 3.0 && gpsBearingDeg >= 0 -> gpsBearingDeg.toDouble()
+
+            // GPS 丢失 → 陀螺仪积分（短期最精确，长时间会漂移）
+            gpsLost && gyroFresh -> {
+                heading + gyroRateDegPerSec * dt
+            }
+
+            // 旋转矢量可用（加速度计+磁力计+陀螺仪融合，比纯罗盘稳定）
+            rvAvailable -> rvSmoothed
+
+            // 纯罗盘
             compassAvailable -> compassSmoothed
-            else -> heading  // 保持上一帧航向
+
+            // 都没有，保持上一帧
+            else -> heading
         }
 
         // 航向 EMA 平滑（避免跳变）
         var headingDiff = effectiveHeading - heading
         if (headingDiff > 180) headingDiff -= 360
         if (headingDiff < -180) headingDiff += 360
-        val headingAlpha = if (speedKmh > 3.0) 0.3 else 0.15
+        // v12.5: 陀螺仪积分时不额外平滑（已经精确），其他源按速度选择 alpha
+        val headingAlpha = when {
+            gpsLost && gyroFresh -> 1.0  // 陀螺仪积分直接信任（短期精确）
+            speedKmh > 3.0 -> 0.3        // GPS bearing
+            rvAvailable -> 0.25          // 旋转矢量（融合过，比罗盘可信）
+            else -> 0.15                 // 纯罗盘
+        }
         heading += headingAlpha * headingDiff
         if (heading < 0) heading += 360
         if (heading >= 360) heading -= 360
@@ -229,7 +298,7 @@ class EkfDeadReckoning {
         lng += vE * dt / (111111.0 * cos(latRad))
 
         // GPS 丢失衰减（v10.21: 更积极，2秒就开始衰减）
-        val timeSinceGps = System.currentTimeMillis() - lastGpsTimeMs
+        // timeSinceGps 已在上方声明（航向判断处）
         if (timeSinceGps > 2000) {
             val decay = 0.99  // 每帧衰减 1%（~1.5秒归零）
             vN *= decay
@@ -381,7 +450,9 @@ class EkfDeadReckoning {
         val unc = getPositionUncertainty()
         val gpsAge = System.currentTimeMillis() - lastGpsTimeMs
         val headingSource = when {
-            speed * 3.6 > 3.0 -> "GPS"
+            speed * 3.6 > 3.0 && gpsAge < 2000 -> "GPS"
+            gpsAge > 2000 && gyroAvailable -> "陀螺"
+            rvAvailable -> "RV"
             compassAvailable -> "罗盘"
             else -> "惯导"
         }
@@ -389,10 +460,13 @@ class EkfDeadReckoning {
             gpsAge < 2000 -> "GPS+INS"
             else -> "INS-DR"
         }
-        val compassTag = if (compassAvailable) "⊕罗盘" else ""
+        val compassTag = if (compassAvailable) "⊕磁" else ""
+        val rvTag = if (rvAvailable) "⊕RV" else ""
+        val gyroTag = if (gyroAvailable) "⊕G" else ""
         val snapTag = if (snappedToRoad && snapConfidence > 0.3) "⊕路" else ""
         val zuptTag = if (isStationary) "⏸停" else ""
         val accelTag = if (linearAccelMagnitude < 900) "|a|=${String.format("%.1f", linearAccelMagnitude)}" else ""
-        return "${mode}[${headingSource}]${compassTag}${snapTag}${zuptTag} K=${String.format("%.2f", lastKalmanGain)} Δ=${String.format("%.1f", lastInnovation)}m σ=${String.format("%.1f", unc)}m ${accelTag}"
+        val gyroRateTag = if (gyroAvailable) "ω=${String.format("%.1f", gyroRateDegPerSec)}" else ""
+        return "${mode}[${headingSource}]${compassTag}${rvTag}${gyroTag}${snapTag}${zuptTag} K=${String.format("%.2f", lastKalmanGain)} Δ=${String.format("%.1f", lastInnovation)}m σ=${String.format("%.1f", unc)}m ${accelTag} ${gyroRateTag}"
     }
 }
