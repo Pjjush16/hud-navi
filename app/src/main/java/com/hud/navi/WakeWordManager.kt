@@ -70,7 +70,7 @@ class WakeWordManager(
         private const val KEYWORDS_FILE = "keywords.txt"
 
         private const val MODEL_DIR = "kws_models"
-        private const val ASSETS_VERSION = 5  // 每次更新 keywords.txt 时递增
+        private const val ASSETS_VERSION = 6  // 每次更新 keywords.txt 时递增
     }
 
     private var audioRecord: AudioRecord? = null
