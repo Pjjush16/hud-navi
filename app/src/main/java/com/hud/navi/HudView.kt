@@ -175,10 +175,20 @@ class HudView @JvmOverloads constructor(
             canvas.restore()
         }
 
-        // 纯净模式：仅路网 + 车标 + 时速，无额外文字
+        // OSM 归属标注（ODbL 协议要求，右下角半透明小字）
+        drawAttribution(canvas, w, h)
     }
 
-    // drawAttribution 已移除 — 纯净模式：仅路网 + 车标 + 时速
+    private fun drawAttribution(canvas: Canvas, w: Float, h: Float) {
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#44FFFFFF")
+            textSize = 22f
+            textAlign = Paint.Align.RIGHT
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+        }
+        val attrY = if (mirrorEnabled) 24f else h - 8f
+        canvas.drawText("© OpenStreetMap", w - 16f, attrY, paint)
+    }
 
     private fun drawRoadNetwork(canvas: Canvas, w: Float, h: Float, metersPerPixel: Double) {
         // 车永远在屏幕中心，路网以车辆位置为中心绘制
