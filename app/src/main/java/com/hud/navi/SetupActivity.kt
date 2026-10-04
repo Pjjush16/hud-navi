@@ -13,7 +13,9 @@ package com.hud.navi
 import android.content.Intent
 import android.os.Bundle
 import android.text.method.LinkMovementMethod
+import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 
@@ -101,7 +103,7 @@ class SetupActivity : AppCompatActivity() {
             text = "🚗 HUD 导航"
             textSize = 28f
             setTextColor(0xFFFFFFFF.toInt())
-            gravity = android.view.Gravity.CENTER
+            gravity = Gravity.CENTER
         }
         container.addView(title)
 
@@ -109,7 +111,7 @@ class SetupActivity : AppCompatActivity() {
             text = "语音助手配置"
             textSize = 18f
             setTextColor(0xAAFFFFFF.toInt())
-            gravity = android.view.Gravity.CENTER
+            gravity = Gravity.CENTER
             setPadding(0, 8, 0, 40)
         }
         container.addView(subtitle)
@@ -149,7 +151,7 @@ class SetupActivity : AppCompatActivity() {
             setBackgroundColor(0xFF2D2D44.toInt())
             setPadding(24, 20, 24, 20)
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
-            singleLine = true
+            isSingleLine = true
             textSize = 14f
         }
         container.addView(etApiKey)
