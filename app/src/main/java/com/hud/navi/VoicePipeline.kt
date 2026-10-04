@@ -103,14 +103,14 @@ class VoicePipeline(
             errors.add("唤醒词: ${e.message}")
         }
 
-        // 2. 意图分类器
+        // 2. 意图分类器（MNN-LLM 原生引擎）
         try {
-            intentClassifier = IntentClassifier()
-            // 异步检查 LLM 服务可用性
+            intentClassifier = IntentClassifier(context)
+            // 异步检查 LLM 引擎可用性（需要 .so + 模型都已就绪）
             scope.launch(Dispatchers.IO) {
                 val available = intentClassifier?.checkAvailability() ?: false
                 if (!available) {
-                    Log.w(TAG, "LLM service not available, intent classification will use fallback")
+                    Log.w(TAG, "LLM engine not available, intent classification will use fallback")
                 }
             }
         } catch (e: Exception) {
@@ -250,10 +250,8 @@ class VoicePipeline(
                 return
             }
 
-            // 分类意图
-            val result = withContext(Dispatchers.IO) {
-                classifier.classify(userText)
-            }
+            // 分类意图（MNN-LLM 本地推理）
+            val result = classifier.classify(userText)
 
             Log.i(TAG, "Intent: ${result.intent}/${result.action}")
             handler.post { callback.onIntentResult(result) }

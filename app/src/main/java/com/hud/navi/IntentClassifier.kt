@@ -1,22 +1,19 @@
 /*
- * IntentClassifier.kt - 本地 LLM 意图分类器 (v11.0)
+ * IntentClassifier.kt - 本地 LLM 意图分类器 (v11.1)
  *
- * 通过 Ollama 兼容的 HTTP API 调用本地 LLM（Qwen2.5-0.5B-Instruct）。
- * 后端：MNN-LLM Android 本地推理（通过内置 HTTP Server）
+ * 通过 MNN-LLM 原生引擎调用本地 LLM（Qwen2.5-0.5B-Instruct）。
+ * 后端：MNN-LLM JNI 直接调用（无需 HTTP Server）
  *
  * 模型输出结构化 JSON，代码直接解析路由。
  */
 
 package com.hud.navi
 
+import android.content.Context
 import android.util.Log
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.io.OutputStreamWriter
-import java.net.HttpURLConnection
-import java.net.URL
-import java.util.concurrent.Executors
 
 /**
  * 意图分类结果
@@ -45,17 +42,10 @@ data class IntentResult(
 }
 
 class IntentClassifier(
-    private var endpoint: String = DEFAULT_ENDPOINT,
-    private var modelName: String = DEFAULT_MODEL,
-    private val timeout: Int = 15000
+    private val context: Context
 ) {
     companion object {
         private const val TAG = "IntentClassifier"
-
-        // 默认端点：本地 MNN-LLM HTTP Server
-        // 如果模型跑在远程服务器上，修改为 "http://100.80.62.97:11434" 等
-        const val DEFAULT_ENDPOINT = "http://127.0.0.1:11434"
-        const val DEFAULT_MODEL = "qwen2.5:0.5b"
 
         /**
          * 系统提示词 — 让 Qwen2.5-0.5B 稳定输出结构化 JSON
@@ -78,55 +68,50 @@ class IntentClassifier(
 "你好啊"→{"intent":"chat","action":"reply","params":{"text":"你好，我是哈德，有什么可以帮你的？"}}
 "现在几点了"→{"intent":"chat","action":"reply","params":{"text":"请查看手机时间"}}
         """.trimIndent()
-
-        // 端点列表（仅本地 MNN-LLM HTTP Server）
-        val FALLBACK_ENDPOINTS = listOf(
-            "http://127.0.0.1:11434",     // 本地 MNN-LLM
-        )
     }
 
-    private val executor = Executors.newSingleThreadExecutor()
-    private var currentEndpoint: String = endpoint
+    // MNN-LLM 原生引擎
+    private val engine = MnnLlmEngine(context)
+    private val modelDownloader = ModelDownloader(context)
     private var isAvailable = false
 
     /**
-     * 检查 LLM 服务是否可用
+     * 检查 LLM 引擎是否可用（.so 已加载 + 模型已下载）
      */
-    fun checkAvailability(): Boolean {
-        for (ep in FALLBACK_ENDPOINTS) {
-            try {
-                val url = URL("$ep/api/tags")
-                val conn = url.openConnection() as HttpURLConnection
-                conn.connectTimeout = 3000
-                conn.readTimeout = 3000
-                conn.requestMethod = "GET"
-
-                if (conn.responseCode == 200) {
-                    currentEndpoint = ep
-                    isAvailable = true
-                    Log.i(TAG, "LLM service available at: $ep")
-                    conn.disconnect()
-                    return true
-                }
-                conn.disconnect()
-            } catch (e: Exception) {
-                Log.w(TAG, "LLM not available at $ep: ${e.message}")
-            }
+    suspend fun checkAvailability(): Boolean {
+        // 1. 检查原生库是否加载成功
+        if (!engine.isAvailable) {
+            Log.w(TAG, "MNN-LLM native library not available")
+            isAvailable = false
+            return false
         }
-        isAvailable = false
-        Log.w(TAG, "No LLM service available")
-        return false
+
+        // 2. 检查模型是否已下载
+        if (!modelDownloader.isModelReady()) {
+            Log.w(TAG, "Model not downloaded yet")
+            isAvailable = false
+            return false
+        }
+
+        // 3. 初始化引擎（如果尚未初始化）
+        if (!isAvailable) {
+            val modelDir = modelDownloader.getModelDir().absolutePath
+            isAvailable = engine.init(modelDir)
+        }
+
+        Log.i(TAG, "LLM engine available: $isAvailable")
+        return isAvailable
     }
 
     fun isReady(): Boolean = isAvailable
 
     /**
-     * 分类用户输入的意图
+     * 分类用户输入的意图（suspend 版本，在 IO 线程执行推理）
      *
      * @param userText ASR 识别出的用户文本
      * @return IntentResult 意图分类结果
      */
-    fun classify(userText: String): IntentResult {
+    suspend fun classify(userText: String): IntentResult {
         if (!isAvailable) {
             Log.w(TAG, "LLM not available, returning fallback")
             return IntentResult.fallback(userText)
@@ -134,7 +119,11 @@ class IntentClassifier(
 
         try {
             val prompt = buildPrompt(userText)
-            val response = callOllamaAPI(prompt)
+            val response = engine.generate(
+                prompt = prompt,
+                maxTokens = 256,
+                temperature = 0.1f  // 低温度确保 JSON 输出稳定
+            )
 
             if (response != null) {
                 val result = parseResponse(response)
@@ -153,7 +142,7 @@ class IntentClassifier(
     /**
      * 聊天模式 — 让模型自由回复（不要求 JSON 格式）
      */
-    fun chat(userText: String, context: String = ""): String {
+    suspend fun chat(userText: String, context: String = ""): String {
         if (!isAvailable) return "抱歉，语音助手暂时不可用。"
 
         try {
@@ -163,7 +152,11 @@ class IntentClassifier(
                 "你是车载语音助手\"哈德\"，用简短自然的方式回答用户。\n用户: $userText"
             }
 
-            val response = callOllamaAPI(chatPrompt, jsonMode = false)
+            val response = engine.generate(
+                prompt = chatPrompt,
+                maxTokens = 256,
+                temperature = 0.7f  // 聊天用较高温度，更自然
+            )
             return response?.trim() ?: "抱歉，我没听懂，请再说一次。"
         } catch (e: Exception) {
             Log.e(TAG, "Chat failed: ${e.message}", e)
@@ -172,77 +165,17 @@ class IntentClassifier(
     }
 
     /**
-     * 更新 LLM 服务地址
+     * 释放引擎资源
      */
-    fun updateEndpoint(newEndpoint: String) {
-        endpoint = newEndpoint
-        currentEndpoint = newEndpoint
-        isAvailable = checkAvailability()
+    fun release() {
+        engine.release()
+        isAvailable = false
     }
 
     // ==================== 内部方法 ====================
 
     private fun buildPrompt(userText: String): String {
         return "$SYSTEM_PROMPT\n用户：$userText\n输出："
-    }
-
-    /**
-     * 调用 Ollama 兼容 API
-     *
-     * 请求格式：
-     * POST /api/generate
-     * {
-     *   "model": "qwen2.5:0.5b",
-     *   "prompt": "...",
-     *   "system": "...",
-     *   "stream": false,
-     *   "options": { "temperature": 0.1, "num_predict": 256 }
-     * }
-     */
-    private fun callOllamaAPI(prompt: String, jsonMode: Boolean = true): String? {
-        val url = URL("$currentEndpoint/api/generate")
-        val conn = url.openConnection() as HttpURLConnection
-        conn.connectTimeout = timeout
-        conn.readTimeout = timeout
-        conn.requestMethod = "POST"
-        conn.doOutput = true
-        conn.setRequestProperty("Content-Type", "application/json")
-
-        val requestBody = JSONObject().apply {
-            put("model", modelName)
-            put("prompt", prompt)
-            put("stream", false)
-            put("options", JSONObject().apply {
-                put("temperature", if (jsonMode) 0.1 else 0.7)
-                put("num_predict", 256)
-                put("stop", listOf("\n用户", "\nUser"))
-            })
-        }
-
-        Log.d(TAG, "Request: ${requestBody.length()} bytes to $currentEndpoint")
-
-        OutputStreamWriter(conn.outputStream, "UTF-8").use { writer ->
-            writer.write(requestBody.toString())
-            writer.flush()
-        }
-
-        val responseCode = conn.responseCode
-        if (responseCode != 200) {
-            Log.w(TAG, "API returned $responseCode")
-            conn.disconnect()
-            return null
-        }
-
-        val responseBody = BufferedReader(InputStreamReader(conn.inputStream, "UTF-8")).use { reader ->
-            reader.readText()
-        }
-        conn.disconnect()
-
-        val responseJson = JSONObject(responseBody)
-        val response = responseJson.optString("response", "")
-        Log.d(TAG, "Response: ${response.take(100)}...")
-
-        return response
     }
 
     /**

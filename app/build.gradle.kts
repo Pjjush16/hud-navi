@@ -11,8 +11,8 @@ android {
         applicationId = "com.hud.navi"
         minSdk = 21
         targetSdk = 34
-        versionCode = 81
-        versionName = "11.0"
+        versionCode = 82
+        versionName = "11.1"
     }
 
     // ABI 分包：输出 arm64-v8a / armeabi-v7a / universal 三个 APK
@@ -50,6 +50,15 @@ android {
             signingConfig = signingConfigs.getByName("release")
         }
     }
+    // v11.1: MNN-LLM 原生库构建（CMake）
+    // .so 文件由 CI 预编译，或本地通过 CMake 构建
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

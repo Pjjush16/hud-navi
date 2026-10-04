@@ -74,6 +74,10 @@ class ChatEngine(
      * @param onUiCallback UI 更新回调（显示结果到 HUD）
      */
     fun handleIntent(result: IntentResult, onUiCallback: ((String) -> Unit)? = null) {
+        handleIntentInternal(result, onUiCallback)
+    }
+
+    private fun handleIntentInternal(result: IntentResult, onUiCallback: ((String) -> Unit)? = null) {
         Log.i(TAG, "Handling intent: ${result.intent}/${result.action}")
 
         when (result.intent) {
