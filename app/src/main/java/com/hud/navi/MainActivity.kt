@@ -358,7 +358,6 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
         // 双击切换镜像
         // 初始化：镜像默认开启，唤醒反馈面板也需要同步翻转
-        wakeFeedback.pivotY = wakeFeedback.height / 2f.takeIf { it > 0 } ?: 0f
         wakeFeedback.post {
             wakeFeedback.pivotY = wakeFeedback.height / 2f
             wakeFeedback.scaleY = if (hudView.mirrorEnabled) -1f else 1f
