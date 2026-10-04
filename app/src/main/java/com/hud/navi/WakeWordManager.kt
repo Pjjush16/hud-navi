@@ -57,6 +57,10 @@ class WakeWordManager(
 
     private var spotter: KeywordSpotter? = null
 
+    // 冷却机制：防止同一次唤醒词触发多次
+    private var lastWakeTime = 0L
+    private val WAKE_COOLDOWN_MS = 2000L  // 2秒冷却
+
     fun init() {
         initError = null
         try {
@@ -119,9 +123,9 @@ class WakeWordManager(
                     provider = "cpu"
                 ),
                 keywordsFile = keywordsPath,
-                keywordsScore = 1.5f,
-                keywordsThreshold = 0.25f,
-                numTrailingBlanks = 2
+                keywordsScore = 2.5f,    // 提高关键词权重，短词（哈德）更容易被识别
+                keywordsThreshold = 0.15f, // 降低阈值，提高灵敏度
+                numTrailingBlanks = 1    // 减少尾随空白，加快响应速度
             )
 
             Log.i(TAG, "Creating KeywordSpotter (newFromFile mode)...")
@@ -203,14 +207,25 @@ class WakeWordManager(
         val buffer = ShortArray(chunkSamples)
         var chunkCount = 0L
         var lastLogTime = System.currentTimeMillis()
+        var silenceChunks = 0L
 
         try {
-            val stream: OnlineStream = spotter!!.createStream()
+            var stream: OnlineStream = spotter!!.createStream()
             Log.i(TAG, "Listen loop started, stream created")
 
             while (running.get()) {
                 val readCount = audioRecord?.read(buffer, 0, chunkSamples) ?: 0
-                if (readCount <= 0) continue
+                if (readCount <= 0) {
+                    silenceChunks++
+                    // 连续500个空chunk（约50秒）重建stream，防止stream卡死
+                    if (silenceChunks > 500) {
+                        Log.w(TAG, "Too many empty reads, recreating stream")
+                        try { stream = spotter!!.createStream() } catch (_: Exception) {}
+                        silenceChunks = 0
+                    }
+                    continue
+                }
+                silenceChunks = 0
 
                 chunkCount++
                 val floatBuf = FloatArray(readCount)
@@ -225,16 +240,25 @@ class WakeWordManager(
                     val result: KeywordSpotterResult = spotter!!.getResult(stream)
                     val keyword = result.keyword
                     if (keyword.isNotBlank()) {
-                        spotter!!.reset(stream)
-                        Log.i(TAG, "[WAKE] $keyword")
-                        onWake(keyword.trim())
+                        val now = System.currentTimeMillis()
+                        if (now - lastWakeTime >= WAKE_COOLDOWN_MS) {
+                            lastWakeTime = now
+                            Log.i(TAG, "[WAKE] $keyword (score accepted)")
+                            onWake(keyword.trim())
+                        } else {
+                            Log.d(TAG, "[WAKE-SKIP] $keyword (cooldown ${now - lastWakeTime}ms)")
+                        }
+                        // 无论是否触发，检测到关键词后重建stream
+                        // 清除缓冲区中残留的相同音节，防止重复触发
+                        try { stream = spotter!!.createStream() } catch (_: Exception) {}
+                        break
                     }
                 }
 
                 // 心跳日志
                 val now = System.currentTimeMillis()
-                if (now - lastLogTime > 5000) {
-                    Log.i(TAG, "Heartbeat: $chunkCount chunks, running=${running.get()}")
+                if (now - lastLogTime > 10000) {
+                    Log.i(TAG, "Heartbeat: $chunkCount chunks, running=${running.get()}, cooldown_active=${now - lastWakeTime < WAKE_COOLDOWN_MS}")
                     lastLogTime = now
                 }
             }
