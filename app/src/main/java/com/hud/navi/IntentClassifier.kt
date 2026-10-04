@@ -2,10 +2,7 @@
  * IntentClassifier.kt - 本地 LLM 意图分类器 (v11.0)
  *
  * 通过 Ollama 兼容的 HTTP API 调用本地 LLM（Qwen2.5-0.5B-Instruct）。
- * 支持后端：
- *   1. MNN-LLM Android 本地推理（通过内置 HTTP Server）
- *   2. 远程 Ollama 服务器（vm590z / cloudpc）
- *   3. 任何 OpenAI / Ollama 兼容 API
+ * 后端：MNN-LLM Android 本地推理（通过内置 HTTP Server）
  *
  * 模型输出结构化 JSON，代码直接解析路由。
  */
@@ -82,10 +79,9 @@ class IntentClassifier(
 "现在几点了"→{"intent":"chat","action":"reply","params":{"text":"请查看手机时间"}}
         """.trimIndent()
 
-        // 备用端点列表（按优先级）
+        // 端点列表（仅本地 MNN-LLM HTTP Server）
         val FALLBACK_ENDPOINTS = listOf(
             "http://127.0.0.1:11434",     // 本地 MNN-LLM
-            "http://100.80.62.97:11434",  // vm590z Ollama (Tailscale)
         )
     }
 
