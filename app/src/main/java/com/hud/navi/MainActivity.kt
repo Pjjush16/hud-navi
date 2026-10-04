@@ -662,7 +662,13 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             ekf.updateCompass(compassBearing)
         }
 
-        ekf.predict(dt, vehicleBearing, targetSpeed * 1000f / 3600f)
+        // v10.21: 传递线性加速度幅度给 EKF，用于零速检测（ZUPT）
+        val linearAccelMag = kotlin.math.sqrt(
+            smoothedWorldAcc[0].toDouble() * smoothedWorldAcc[0].toDouble() +
+            smoothedWorldAcc[1].toDouble() * smoothedWorldAcc[1].toDouble() +
+            smoothedWorldAcc[2].toDouble() * smoothedWorldAcc[2].toDouble()
+        )
+        ekf.predict(dt, vehicleBearing, targetSpeed * 1000f / 3600f, linearAccelMag)
         vehicleLat = ekf.lat; vehicleLng = ekf.lng
 
         val gyroActive = hasGyro && (System.currentTimeMillis() - lastGyroTime) < 500

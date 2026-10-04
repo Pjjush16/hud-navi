@@ -20,17 +20,23 @@ package com.hud.navi
 import kotlin.math.*
 
 /**
- * EKF 三源融合惯导引擎 v3 — GPS/北斗 + IMU + 电子罗盘
+ * EKF 三源融合惯导引擎 v4 — GPS/北斗 + IMU + 电子罗盘 + 加速度计零速检测
  *
- * v10.20 核心改进：
- * 1. IMU 始终激活 — 不再依赖路网吸附状态，惯导始终参与融合
- * 2. 电子罗盘融合 — 低速时用罗盘提供航向（GPS bearing 在低速时不可靠）
- * 3. GPS 权重动态调整 — GPS 精度差时更多信任 IMU 推算
- * 4. 路网吸附仅作为微调层 — 不影响惯导激活状态
+ * v10.21 核心改进：加速度计零速检测（ZUPT）
+ * 1. 加速度计零速交叉验证 — 线性加速度幅度 < 0.4 m/s² 时视为静止
+ * 2. 连续 15 帧（~250ms）确认停车后，强制速度衰减到零
+ * 3. 静止状态下忽略 GPS 报告的速度（GPS 静止时也会报告噪声速度）
+ * 4. GPS 丢失衰减更积极（2秒开始衰减，每帧衰减 1%）
+ * 5. GPS + 加速度计互相佐证：GPS 给位置/速度，加速度计给"动/停"判断
+ *
+ * v10.20 改进（仍生效）：
+ * - IMU 始终激活，不依赖路网吸附
+ * - 电子罗盘融合（低速时用罗盘提供航向）
+ * - GPS 精度动态加权
  *
  * 三源分工：
- * - GPS/北斗：大方向参考（绝对位置，精度低，会漂移）
- * - IMU（加速度计+陀螺仪）：精确轨迹推算（转弯、加减速）
+ * - GPS/北斗：大方向参考（绝对位置 + 运动速度，但会漂移）
+ * - IMU（加速度计+陀螺仪）：精确轨迹推算 + 运动状态判断（动/停）
  * - 电子罗盘：车头朝向（不依赖运动状态）
  *
  * 状态向量 [4]:
@@ -70,6 +76,14 @@ class EkfDeadReckoning {
     // === GPS 丢失计时 ===
     var gpsLostTimeMs = 0L
     private var lastGpsTimeMs = 0L
+
+    // === 零速检测（ZUPT）===
+    // 线性加速度幅度（m/s²），由外部传入
+    var linearAccelMagnitude = 999.0
+    private val STATIONARY_THRESHOLD = 0.4   // 线性加速度 < 0.4 m/s² 视为静止
+    private val STATIONARY_CONFIRM_FRAMES = 15  // 连续 15 帧（~250ms）静止 → 确认停车
+    private var stationaryFrames = 0
+    var isStationary = false  // 公开状态，供 UI 显示
 
     // === 协方差 ===
     private val P = Array(4) { DoubleArray(4) }
@@ -125,7 +139,11 @@ class EkfDeadReckoning {
     /**
      * 预测步（Predict）— 每帧调用（16ms）
      *
-     * v10.20: IMU 始终激活，不依赖路网吸附
+     * v10.21 核心改进：加速度计零速检测（ZUPT）
+     *   GPS 停了但惯导还在推 → 加速度计告诉你车到底动没动
+     *   当线性加速度幅度很小（< 0.4 m/s²）时，车是静止的，
+     *   不管 GPS 最后给了多快的速度，都快速衰减到零。
+     *
      * 航向来源：
      *   - 速度 > 3 km/h：用 GPS bearing（运动方向可靠）
      *   - 速度 ≤ 3 km/h：用罗盘（GPS bearing 在低速时跳变严重）
@@ -134,12 +152,26 @@ class EkfDeadReckoning {
      * @param dtMs 帧间隔（毫秒）
      * @param gpsBearingDeg GPS bearing（度）
      * @param speedMs GPS speed（m/s）
+     * @param linearAccelMag 线性加速度幅度（m/s²），由外部传入
      */
-    fun predict(dtMs: Long, gpsBearingDeg: Float, speedMs: Float) {
+    fun predict(dtMs: Long, gpsBearingDeg: Float, speedMs: Float, linearAccelMag: Double = 999.0) {
         if (!initialized) return
 
         val dt = dtMs.toDouble() / 1000.0
         if (dt <= 0.0 || dt > 1.0) return
+
+        // ── 零速检测（ZUPT）──
+        // 线性加速度幅度很小 = 车没在加速/减速 = 车是静止的
+        this.linearAccelMagnitude = linearAccelMag
+        if (linearAccelMag < STATIONARY_THRESHOLD) {
+            stationaryFrames++
+            if (stationaryFrames >= STATIONARY_CONFIRM_FRAMES) {
+                isStationary = true
+            }
+        } else {
+            stationaryFrames = 0
+            isStationary = false
+        }
 
         // ── 确定有效航向 ──
         // 高速时 GPS bearing 可靠，低速时用罗盘
@@ -159,8 +191,13 @@ class EkfDeadReckoning {
         if (heading < 0) heading += 360
         if (heading >= 360) heading -= 360
 
-        // 速度 EMA 平滑
-        this.speed += 0.3 * (speedMs.toDouble() - this.speed)
+        // 速度 EMA 平滑（加速度计确认静止时，GPS 速度不可信）
+        if (!isStationary) {
+            this.speed += 0.3 * (speedMs.toDouble() - this.speed)
+        } else {
+            // 加速度计说车停了 → GPS 报告的速度是噪声，忽略
+            // speed 将在下面的零速衰减中归零
+        }
 
         // 分解速度到北/东
         val headingRad = Math.toRadians(heading)
@@ -172,15 +209,29 @@ class EkfDeadReckoning {
         vN += speedAlpha * (targetVN - vN)
         vE += speedAlpha * (targetVE - vE)
 
+        // ── 零速强制衰减 ──
+        // 加速度计说车停了 → 不管 GPS 给了什么速度，快速衰减到零
+        if (isStationary) {
+            // 确认静止：每帧衰减 8%，~1秒归零
+            val stopDecay = 0.92
+            vN *= stopDecay
+            vE *= stopDecay
+            speed *= stopDecay
+            // 速度足够小时直接清零
+            if (speed < 0.05) {  // < 0.18 km/h
+                vN = 0.0; vE = 0.0; speed = 0.0
+            }
+        }
+
         // ── 状态预测（IMU 惯导始终激活）──
         val latRad = Math.toRadians(lat)
         lat += vN * dt / 111111.0
         lng += vE * dt / (111111.0 * cos(latRad))
 
-        // GPS 丢失衰减（惯导独立推算，误差逐渐增大）
+        // GPS 丢失衰减（v10.21: 更积极，2秒就开始衰减）
         val timeSinceGps = System.currentTimeMillis() - lastGpsTimeMs
-        if (timeSinceGps > 3000) {
-            val decay = 0.998  // 每帧衰减 0.2%（惯导推算 5 秒内基本可靠）
+        if (timeSinceGps > 2000) {
+            val decay = 0.99  // 每帧衰减 1%（~1.5秒归零）
             vN *= decay
             vE *= decay
             speed *= decay
@@ -340,6 +391,8 @@ class EkfDeadReckoning {
         }
         val compassTag = if (compassAvailable) "⊕罗盘" else ""
         val snapTag = if (snappedToRoad && snapConfidence > 0.3) "⊕路" else ""
-        return "${mode}[${headingSource}]${compassTag}${snapTag} K=${String.format("%.2f", lastKalmanGain)} Δ=${String.format("%.1f", lastInnovation)}m σ=${String.format("%.1f", unc)}m"
+        val zuptTag = if (isStationary) "⏸停" else ""
+        val accelTag = if (linearAccelMagnitude < 900) "|a|=${String.format("%.1f", linearAccelMagnitude)}" else ""
+        return "${mode}[${headingSource}]${compassTag}${snapTag}${zuptTag} K=${String.format("%.2f", lastKalmanGain)} Δ=${String.format("%.1f", lastInnovation)}m σ=${String.format("%.1f", unc)}m ${accelTag}"
     }
 }
