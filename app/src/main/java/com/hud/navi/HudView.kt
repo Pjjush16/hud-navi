@@ -183,11 +183,11 @@ class HudView @JvmOverloads constructor(
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.parseColor("#44FFFFFF")
             textSize = 22f
-            textAlign = Paint.Align.RIGHT
+            textAlign = Paint.Align.CENTER
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
         }
         val attrY = if (mirrorEnabled) 24f else h - 8f
-        canvas.drawText("© OpenStreetMap", w - 16f, attrY, paint)
+        canvas.drawText("© OpenStreetMap contributors", w / 2f, attrY, paint)
     }
 
     private fun drawRoadNetwork(canvas: Canvas, w: Float, h: Float, metersPerPixel: Double) {
