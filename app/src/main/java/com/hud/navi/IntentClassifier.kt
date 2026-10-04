@@ -1,10 +1,10 @@
 /*
- * IntentClassifier.kt - 本地 LLM 意图分类器 (v11.1)
+ * IntentClassifier.kt - 意图分类器 (v11.3 双版本)
  *
- * 通过 MNN-LLM 原生引擎调用本地 LLM（Qwen2.5-0.5B-Instruct）。
- * 后端：MNN-LLM JNI 直接调用（无需 HTTP Server）
+ * full 版本：通过 MNN-LLM 原生引擎调用本地 Qwen2.5-0.5B 语义理解
+ * lite 版本：通过关键词匹配识别固定指令
  *
- * 模型输出结构化 JSON，代码直接解析路由。
+ * 由 BuildConfig.IS_LLM_ENABLED 控制使用哪种模式
  */
 
 package com.hud.navi
@@ -22,7 +22,7 @@ data class IntentResult(
     val intent: String,       // navigation | search | hud_control | music | chat
     val action: String,       // 具体动作
     val params: Map<String, Any>,  // 参数
-    val rawText: String       // 模型原始输出（调试用）
+    val rawText: String       // 原始文本（调试用）
 ) {
     companion object {
         const val INTENT_NAVIGATION = "navigation"
@@ -47,15 +47,7 @@ class IntentClassifier(
     companion object {
         private const val TAG = "IntentClassifier"
 
-        /**
-         * 系统提示词 — 让 Qwen2.5-0.5B 稳定输出结构化 JSON
-         *
-         * 设计原则：
-         * - 足够短（<200 token），减少推理延迟
-         * - 明确的 JSON 格式约束
-         * - 覆盖所有 HUD 场景的 intent 类型
-         * - 提供 few-shot 示例，帮助小模型理解格式
-         */
+        // ==================== LLM 系统提示词（仅 full 版使用） ====================
         val SYSTEM_PROMPT = """
 你是车载语音助手"哈德"。识别用户意图，仅输出JSON，不要其他文字。
 格式：{"intent":"类型","action":"动作","params":{参数}}
@@ -68,94 +60,130 @@ class IntentClassifier(
 "你好啊"→{"intent":"chat","action":"reply","params":{"text":"你好，我是哈德，有什么可以帮你的？"}}
 "现在几点了"→{"intent":"chat","action":"reply","params":{"text":"请查看手机时间"}}
         """.trimIndent()
+
+        // ==================== 关键词规则（lite 版 + full 版降级用） ====================
+
+        // 导航相关关键词
+        private val NAV_KEYWORDS = listOf("导航", "去哪", "路线", "带路", "怎么走", "开往")
+        private val POI_KEYWORDS = listOf("加油站", "停车场", "停车", "厕所", "洗手间", "医院",
+            "餐厅", "饭店", "酒店", "超市", "商场", "银行", "充电桩", "洗车", "修车")
+        private val NAV_DIRECTION = listOf("家", "公司", "单位", "学校", "机场", "火车站")
+
+        // 搜索相关关键词
+        private val SEARCH_KEYWORDS = listOf("搜索", "搜一下", "查一下", "查查", "帮我搜",
+            "帮我查", "看看", "找一下", "问问", "告诉我", "什么是", "是什么")
+
+        // HUD 控制关键词
+        private val MIRROR_ON_KEYWORDS = listOf("开镜像", "打开镜像", "镜像开", "镜像打开", "翻转", "打开翻转")
+        private val MIRROR_OFF_KEYWORDS = listOf("关镜像", "关闭镜像", "镜像关", "镜像关闭", "关翻转", "关闭翻转")
+        private val MIRROR_TOGGLE_KEYWORDS = listOf("切换镜像", "镜像切换", "翻转切换", "切换翻转")
+
+        // 音乐关键词
+        private val MUSIC_PLAY_KEYWORDS = listOf("播放", "放歌", "放音乐", "来首歌", "听歌", "听音乐")
+        private val MUSIC_PAUSE_KEYWORDS = listOf("暂停", "停一下", "别放了", "停止播放")
+        private val MUSIC_NEXT_KEYWORDS = listOf("下一首", "换一首", "跳过")
+        private val MUSIC_PREV_KEYWORDS = listOf("上一首", "前一首")
     }
 
-    // MNN-LLM 原生引擎
-    private val engine = MnnLlmEngine(context)
-    private val modelManager = ModelManager(context)
-    private var isAvailable = false
+    // ========== LLM 引擎（仅 full 版使用） ==========
+    private val useLlm = BuildConfig.IS_LLM_ENABLED
+    private var engine: MnnLlmEngine? = null
+    private var modelManager: ModelManager? = null
+    private var isLlmAvailable = false
+
+    // ========== 模式标识 ==========
+    val mode: String get() = if (useLlm && isLlmAvailable) "LLM" else "Keyword"
 
     /**
-     * 检查 LLM 引擎是否可用（.so 已加载 + 模型已就绪）
-     * 如果模型尚未从 assets 解压，会自动触发解压。
+     * 检查引擎是否可用
+     * full 版：检查 .so + 模型是否就绪
+     * lite 版：直接返回 true（关键词匹配不需要额外资源）
      */
     suspend fun checkAvailability(): Boolean {
-        // 1. 检查原生库是否加载成功
-        if (!engine.isAvailable) {
-            Log.w(TAG, "MNN-LLM native library not available")
-            isAvailable = false
-            return false
+        if (!useLlm) {
+            Log.i(TAG, "Lite mode: keyword matching, always available")
+            return true
         }
 
-        // 2. 检查模型是否已解压到内部存储，没有则从 assets 解压
-        if (!modelManager.isModelReady()) {
-            if (!modelManager.hasAssetsModel()) {
-                Log.w(TAG, "No model files in assets/llm/")
-                isAvailable = false
-                return false
+        // full 版：初始化 LLM 引擎
+        if (engine == null) {
+            engine = MnnLlmEngine(context)
+            modelManager = ModelManager(context)
+        }
+
+        val eng = engine!!
+        val mgr = modelManager!!
+
+        // 1. 检查原生库
+        if (!eng.isAvailable) {
+            Log.w(TAG, "MNN-LLM native library not available, falling back to keyword mode")
+            isLlmAvailable = false
+            return true  // 关键词模式仍然可用
+        }
+
+        // 2. 检查/解压模型
+        if (!mgr.isModelReady()) {
+            if (!mgr.hasAssetsModel()) {
+                Log.w(TAG, "No model in assets, falling back to keyword mode")
+                isLlmAvailable = false
+                return true
             }
             Log.i(TAG, "Extracting model from assets...")
-            val extracted = withContext(Dispatchers.IO) {
-                modelManager.extractFromAssets()
-            }
+            val extracted = withContext(Dispatchers.IO) { mgr.extractFromAssets() }
             if (!extracted) {
-                Log.e(TAG, "Model extraction failed")
-                isAvailable = false
-                return false
+                Log.e(TAG, "Model extraction failed, falling back to keyword mode")
+                isLlmAvailable = false
+                return true
             }
         }
 
-        // 3. 初始化引擎（如果尚未初始化）
-        if (!isAvailable) {
-            val modelDir = modelManager.getModelDir().absolutePath
-            isAvailable = engine.init(modelDir)
+        // 3. 初始化引擎
+        if (!isLlmAvailable) {
+            val modelDir = mgr.getModelDir().absolutePath
+            isLlmAvailable = eng.init(modelDir)
+            if (!isLlmAvailable) {
+                Log.w(TAG, "LLM init failed, falling back to keyword mode")
+            }
         }
 
-        Log.i(TAG, "LLM engine available: $isAvailable")
-        return isAvailable
+        Log.i(TAG, "LLM engine available: $isLlmAvailable, mode: $mode")
+        return true
     }
 
-    fun isReady(): Boolean = isAvailable
+    fun isReady(): Boolean = true  // 关键词模式始终可用
 
     /**
-     * 分类用户输入的意图（suspend 版本，在 IO 线程执行推理）
-     *
-     * @param userText ASR 识别出的用户文本
-     * @return IntentResult 意图分类结果
+     * 分类用户输入意图
+     * full + LLM可用：使用本地模型语义理解
+     * lite 或 LLM不可用：使用关键词匹配
      */
     suspend fun classify(userText: String): IntentResult {
-        if (!isAvailable) {
-            Log.w(TAG, "LLM not available, returning fallback")
-            return IntentResult.fallback(userText)
-        }
-
-        try {
-            val prompt = buildPrompt(userText)
-            val response = engine.generate(
-                prompt = prompt,
-                maxTokens = 256,
-                temperature = 0.1f  // 低温度确保 JSON 输出稳定
-            )
-
-            if (response != null) {
-                val result = parseResponse(response)
+        // 优先尝试 LLM（仅 full 版且引擎可用）
+        if (useLlm && isLlmAvailable) {
+            try {
+                val result = classifyWithLlm(userText)
                 if (result != null) {
-                    Log.i(TAG, "Classified: ${result.intent}/${result.action}")
+                    Log.i(TAG, "LLM classified: ${result.intent}/${result.action}")
                     return result
                 }
+            } catch (e: Exception) {
+                Log.e(TAG, "LLM classification failed: ${e.message}, falling back to keyword")
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Classification failed: ${e.message}", e)
         }
 
-        return IntentResult.fallback(userText)
+        // 降级/默认：关键词匹配
+        val result = classifyWithKeywords(userText)
+        Log.i(TAG, "Keyword classified: ${result.intent}/${result.action}")
+        return result
     }
 
     /**
-     * 聊天模式 — 让模型自由回复（不要求 JSON 格式）
+     * 聊天模式（仅 full 版 LLM 可用时使用）
      */
     suspend fun chat(userText: String, context: String = ""): String {
-        if (!isAvailable) return "抱歉，语音助手暂时不可用。"
+        if (!useLlm || !isLlmAvailable) {
+            return "抱歉，当前为轻量版，不支持自由聊天。"
+        }
 
         try {
             val chatPrompt = if (context.isNotEmpty()) {
@@ -164,10 +192,10 @@ class IntentClassifier(
                 "你是车载语音助手\"哈德\"，用简短自然的方式回答用户。\n用户: $userText"
             }
 
-            val response = engine.generate(
+            val response = engine!!.generate(
                 prompt = chatPrompt,
                 maxTokens = 256,
-                temperature = 0.7f  // 聊天用较高温度，更自然
+                temperature = 0.7f
             )
             return response?.trim() ?: "抱歉，我没听懂，请再说一次。"
         } catch (e: Exception) {
@@ -176,48 +204,33 @@ class IntentClassifier(
         }
     }
 
-    /**
-     * 释放引擎资源
-     */
     fun release() {
-        engine.release()
-        isAvailable = false
+        engine?.release()
+        isLlmAvailable = false
     }
 
-    // ==================== 内部方法 ====================
+    // ==================== LLM 分类（full 版） ====================
 
-    private fun buildPrompt(userText: String): String {
-        return "$SYSTEM_PROMPT\n用户：$userText\n输出："
+    private suspend fun classifyWithLlm(userText: String): IntentResult? {
+        val prompt = "$SYSTEM_PROMPT\n用户：$userText\n输出："
+        val response = engine!!.generate(prompt = prompt, maxTokens = 256, temperature = 0.1f)
+            ?: return null
+        return parseLlmResponse(response)
     }
 
-    /**
-     * 解析模型输出的 JSON
-     *
-     * 模型可能输出：
-     * - 纯 JSON：{"intent":"navigation","action":"search_poi","params":{"keyword":"加油站"}}
-     * - 带 markdown：```json\n{...}\n```
-     * - 带前缀文字：好的，我理解了...{"intent":"..."}
-     *
-     * 解析策略：
-     * 1. 先尝试直接解析
-     * 2. 失败则提取 {...} 部分再解析
-     * 3. 再失败则用正则提取关键字段
-     */
-    private fun parseResponse(response: String): IntentResult? {
+    private fun parseLlmResponse(response: String): IntentResult? {
         val trimmed = response.trim()
 
         // 策略1：直接解析
         try {
-            val json = JSONObject(trimmed)
-            return extractIntent(json, trimmed)
+            return extractIntent(JSONObject(trimmed), trimmed)
         } catch (_: Exception) {}
 
         // 策略2：提取 JSON 块
         val jsonBlock = extractJsonBlock(trimmed)
         if (jsonBlock != null) {
             try {
-                val json = JSONObject(jsonBlock)
-                return extractIntent(json, trimmed)
+                return extractIntent(JSONObject(jsonBlock), trimmed)
             } catch (_: Exception) {}
         }
 
@@ -228,36 +241,23 @@ class IntentClassifier(
             val intent = intentMatch.groupValues[1]
             val action = actionMatch?.groupValues?.get(1) ?: "unknown"
             val params = mutableMapOf<String, Any>()
-
-            // 提取 params 中的常见字段
-            val keywordMatch = Regex("\"keyword\"\\s*:\\s*\"([^\"]+)\"").find(trimmed)
-            val queryMatch = Regex("\"query\"\\s*:\\s*\"([^\"]+)\"").find(trimmed)
-            val textMatch = Regex("\"text\"\\s*:\\s*\"([^\"]+)\"").find(trimmed)
-
-            keywordMatch?.let { params["keyword"] = it.groupValues[1] }
-            queryMatch?.let { params["query"] = it.groupValues[1] }
-            textMatch?.let { params["text"] = it.groupValues[1] }
-
-            Log.i(TAG, "Parsed via regex: intent=$intent, action=$action")
+            Regex("\"keyword\"\\s*:\\s*\"([^\"]+)\"").find(trimmed)?.let { params["keyword"] = it.groupValues[1] }
+            Regex("\"query\"\\s*:\\s*\"([^\"]+)\"").find(trimmed)?.let { params["query"] = it.groupValues[1] }
+            Regex("\"text\"\\s*:\\s*\"([^\"]+)\"").find(trimmed)?.let { params["text"] = it.groupValues[1] }
             return IntentResult(intent, action, params, trimmed)
         }
 
-        Log.w(TAG, "Failed to parse response: ${trimmed.take(100)}")
+        Log.w(TAG, "Failed to parse LLM response: ${trimmed.take(100)}")
         return null
     }
 
     private fun extractJsonBlock(text: String): String? {
-        // 匹配 ```json ... ``` 或 ``` ... ``` 中的内容
-        val codeBlockMatch = Regex("```(?:json)?\\s*\\n?(.*?)\\n?```", RegexOption.DOT_MATCHES_ALL).find(text)
-        if (codeBlockMatch != null) return codeBlockMatch.groupValues[1].trim()
-
-        // 匹配第一个 { 到最后一个 } 之间的内容
-        val firstBrace = text.indexOf('{')
-        val lastBrace = text.lastIndexOf('}')
-        if (firstBrace >= 0 && lastBrace > firstBrace) {
-            return text.substring(firstBrace, lastBrace + 1)
+        Regex("```(?:json)?\\s*\\n?(.*?)\\n?```", RegexOption.DOT_MATCHES_ALL).find(text)?.let {
+            return it.groupValues[1].trim()
         }
-
+        val first = text.indexOf('{')
+        val last = text.lastIndexOf('}')
+        if (first >= 0 && last > first) return text.substring(first, last + 1)
         return null
     }
 
@@ -265,16 +265,95 @@ class IntentClassifier(
         val intent = json.optString("intent", IntentResult.INTENT_UNKNOWN)
         val action = json.optString("action", "unknown")
         val params = mutableMapOf<String, Any>()
+        json.optJSONObject("params")?.let { obj ->
+            val keys = obj.keys()
+            while (keys.hasNext()) { val k = keys.next(); params[k] = obj.get(k) }
+        }
+        return IntentResult(intent, action, params, rawText)
+    }
 
-        val paramsObj = json.optJSONObject("params")
-        if (paramsObj != null) {
-            val keys = paramsObj.keys()
-            while (keys.hasNext()) {
-                val key = keys.next()
-                params[key] = paramsObj.get(key)
+    // ==================== 关键词分类（lite 版 + full 版降级） ====================
+
+    private fun classifyWithKeywords(userText: String): IntentResult {
+        val text = userText.lowercase().trim()
+
+        // --- 1. HUD 控制（镜像） ---
+        if (MIRROR_OFF_KEYWORDS.any { text.contains(it) }) {
+            return IntentResult(IntentResult.INTENT_HUD_CONTROL, "mirror_off", emptyMap(), userText)
+        }
+        if (MIRROR_ON_KEYWORDS.any { text.contains(it) }) {
+            return IntentResult(IntentResult.INTENT_HUD_CONTROL, "mirror_on", emptyMap(), userText)
+        }
+        if (MIRROR_TOGGLE_KEYWORDS.any { text.contains(it) }) {
+            return IntentResult(IntentResult.INTENT_HUD_CONTROL, "mirror_toggle", emptyMap(), userText)
+        }
+
+        // --- 2. 导航 ---
+        if (NAV_KEYWORDS.any { text.contains(it) }) {
+            // 提取目的地关键词
+            val keyword = extractDestination(text)
+            val sort = if (text.contains("最近") || text.contains("附近") || text.contains("离我近")) "nearest" else ""
+            return IntentResult(IntentResult.INTENT_NAVIGATION, "search_poi",
+                buildMap {
+                    if (keyword.isNotBlank()) put("keyword", keyword)
+                    if (sort.isNotBlank()) put("sort", sort)
+                }, userText)
+        }
+        // POI 直接说（"附近的加油站"）
+        for (poi in POI_KEYWORDS) {
+            if (text.contains(poi)) {
+                val sort = if (text.contains("最近") || text.contains("附近") || text.contains("近")) "nearest" else ""
+                return IntentResult(IntentResult.INTENT_NAVIGATION, "search_poi",
+                    buildMap {
+                        put("keyword", poi)
+                        if (sort.isNotBlank()) put("sort", sort)
+                    }, userText)
             }
         }
 
-        return IntentResult(intent, action, params, rawText)
+        // --- 3. 搜索 ---
+        for (kw in SEARCH_KEYWORDS) {
+            if (text.contains(kw)) {
+                val query = text.substringAfter(kw).trim().trimEnd('？', '?', '。', '.', '！', '!')
+                return IntentResult(IntentResult.INTENT_SEARCH, "web_search",
+                    mapOf("query" to query.ifBlank { userText }), userText)
+            }
+        }
+
+        // --- 4. 音乐 ---
+        if (MUSIC_PAUSE_KEYWORDS.any { text.contains(it) }) {
+            return IntentResult(IntentResult.INTENT_MUSIC, "pause", emptyMap(), userText)
+        }
+        if (MUSIC_NEXT_KEYWORDS.any { text.contains(it) }) {
+            return IntentResult(IntentResult.INTENT_MUSIC, "next", emptyMap(), userText)
+        }
+        if (MUSIC_PREV_KEYWORDS.any { text.contains(it) }) {
+            return IntentResult(IntentResult.INTENT_MUSIC, "previous", emptyMap(), userText)
+        }
+        if (MUSIC_PLAY_KEYWORDS.any { text.contains(it) }) {
+            return IntentResult(IntentResult.INTENT_MUSIC, "play", emptyMap(), userText)
+        }
+
+        // --- 5. 兜底：聊天 ---
+        return IntentResult.fallback(userText)
+    }
+
+    /**
+     * 从用户文本中提取目的地关键词
+     * "导航去加油站" → "加油站"
+     * "带我去机场" → "机场"
+     * "导航去最近的加油站" → "加油站"
+     */
+    private fun extractDestination(text: String): String {
+        var dest = text
+        // 去掉导航动词
+        for (kw in NAV_KEYWORDS) {
+            dest = dest.replace(kw, "")
+        }
+        // 去掉修饰词
+        for (modifier in listOf("最近的", "附近的", "最近的", "去", "到", "个", "一个")) {
+            dest = dest.replace(modifier, "")
+        }
+        return dest.trim().trimEnd('？', '?', '。', '.', '！', '!', '吧', '啊')
     }
 }

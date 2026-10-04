@@ -11,8 +11,27 @@ android {
         applicationId = "com.hud.navi"
         minSdk = 21
         targetSdk = 34
-        versionCode = 83
-        versionName = "11.2"
+        versionCode = 84
+        versionName = "11.3"
+    }
+
+    // ========== 双版本：lite（关键词识别）+ full（本地LLM） ==========
+    flavorDimensions += "model"
+
+    productFlavors {
+        create("lite") {
+            dimension = "model"
+            applicationIdSuffix = ".lite"
+            versionNameSuffix = "-lite"
+            buildConfigField("boolean", "IS_LLM_ENABLED", "false")
+            resValue("string", "app_name", "HUD 导航 Lite")
+        }
+        create("full") {
+            dimension = "model"
+            versionNameSuffix = "-full"
+            buildConfigField("boolean", "IS_LLM_ENABLED", "true")
+            resValue("string", "app_name", "HUD 导航")
+        }
     }
 
     // ABI 分包：输出 arm64-v8a / armeabi-v7a / universal 三个 APK
@@ -26,7 +45,6 @@ android {
     }
 
     // 强制原生库以 STORED 模式打包 + 页对齐（修复安装失败）
-    // sherpa-onnx AAR 中的 .so 默认被 deflated 压缩，导致 Android 安装器无法 mmap
     packaging {
         jniLibs {
             useLegacyPackaging = true
@@ -50,9 +68,10 @@ android {
             signingConfig = signingConfigs.getByName("release")
         }
     }
-    // v11.2: 原生库通过 CI 预编译（MNN-LLM + sherpa-onnx），
-    // 复制到 jniLibs/ 目录，无需 CMake 本地编译。
-    // MNN .so 来自 build.yml 的 build-mnn-native job 编译产物。
+
+    buildFeatures {
+        buildConfig = true
+    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -63,6 +82,23 @@ android {
     }
 }
 
+// ========== Lite 版本：排除 LLM 模型资源（MNN .so 本身不在 lite 构建中） ==========
+android.applicationVariants.all {
+    val variant = this
+    if (variant.flavorName == "lite") {
+        variant.mergeAssetsProvider.configure {
+            doLast {
+                val assetsDir = outputDir.get().asFile
+                val llmDir = File(assetsDir, "llm")
+                if (llmDir.exists()) {
+                    llmDir.deleteRecursively()
+                    logger.lifecycle("Lite: removed assets/llm/")
+                }
+            }
+        }
+    }
+}
+
 dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.appcompat:appcompat:1.6.1")
@@ -70,12 +106,5 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 
     // sherpa-onnx: 离线关键词识别（中文唤醒词）
-    // AAR 由 CI workflow 自动下载到 app/libs/
     implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar", "*.jar"))))
-
-    // v11.0: MNN-LLM — 本地 LLM 推理（Qwen2.5-0.5B）
-    // 阿里出品，对 Qwen 系列天然友好
-    // 模型文件需放入 app/src/main/assets/llm/ 目录（MNN 格式）
-    // Maven 仓库待确认，目前通过 Ollama HTTP API 兼容调用
-    // implementation("com.alibaba:MNN-LLM:2.9.0")
 }

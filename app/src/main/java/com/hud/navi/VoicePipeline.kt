@@ -1,16 +1,13 @@
 /*
- * VoicePipeline.kt - 语音交互管线编排器 (v11.0)
+ * VoicePipeline.kt - 语音交互管线编排器 (v11.3 双版本)
  *
  * 完整语音管线：
- *   唤醒词(sherpa-onnx KWS) → "我在"反馈 → 录音(VAD) → ASR转文字
- *   → Qwen2.5-0.5B(MNN-LLM) → JSON意图路由 → 执行 + TTS语音回复
+ *   唤醒词(sherpa-onnx KWS) → "我在"反馈 → 录音(ASR) → 意图分类 → 执行 + TTS
  *
- * 各模块职责：
- *   - WakeWordManager: 唤醒词检测（已有）
- *   - VoiceCommandManager: 录音 + ASR
- *   - IntentClassifier: LLM 意图分类
- *   - WebSearchClient: SearXNG + Bing 搜索
- *   - ChatEngine: 聊天 + TTS
+ * full 版：意图分类使用本地 Qwen2.5-0.5B (MNN-LLM) 语义理解
+ * lite 版：意图分类使用关键词匹配（固定指令集）
+ *
+ * 由 BuildConfig.IS_LLM_ENABLED 控制，IntentClassifier 内部自动切换
  */
 
 package com.hud.navi
@@ -28,7 +25,7 @@ enum class PipelineState {
     IDLE,           // 等待唤醒词
     WAKE_DETECTED,  // 唤醒词已检测，准备录音
     LISTENING,      // 正在录音
-    PROCESSING,     // ASR + LLM 处理中
+    PROCESSING,     // ASR + 意图分类处理中
     SPEAKING,       // TTS 播报中
     ERROR           // 错误状态
 }
@@ -80,8 +77,8 @@ class VoicePipeline(
      * 初始化所有子模块
      *
      * 初始化顺序：
-     * 1. WakeWordManager（已有，唤醒词检测）
-     * 2. IntentClassifier（MNN-LLM 意图分类）
+     * 1. WakeWordManager（唤醒词检测）
+     * 2. IntentClassifier（LLM 或关键词，由 BuildConfig 决定）
      * 3. WebSearchClient（搜索引擎）
      * 4. ChatEngine（TTS）
      * 5. VoiceCommandManager（ASR）
@@ -103,15 +100,12 @@ class VoicePipeline(
             errors.add("唤醒词: ${e.message}")
         }
 
-        // 2. 意图分类器（MNN-LLM 原生引擎）
+        // 2. 意图分类器（LLM full版 / 关键词 lite版）
         try {
             intentClassifier = IntentClassifier(context)
-            // 异步检查 LLM 引擎可用性（需要 .so + 模型都已就绪）
             scope.launch(Dispatchers.IO) {
-                val available = intentClassifier?.checkAvailability() ?: false
-                if (!available) {
-                    Log.w(TAG, "LLM engine not available, intent classification will use fallback")
-                }
+                intentClassifier?.checkAvailability()
+                Log.i(TAG, "IntentClassifier ready, mode: ${intentClassifier?.mode ?: "unknown"}")
             }
         } catch (e: Exception) {
             errors.add("意图分类: ${e.message}")
@@ -154,9 +148,6 @@ class VoicePipeline(
         Log.i(TAG, "Pipeline initialized. Wake=${wakeWordManager?.isReady()}, ASR=${voiceCommandManager != null}")
     }
 
-    /**
-     * 启动唤醒词监听
-     */
     fun start() {
         if (wakeWordManager?.isReady() == true) {
             wakeWordManager?.start()
@@ -167,9 +158,6 @@ class VoicePipeline(
         }
     }
 
-    /**
-     * 暂停（onPause 时调用）
-     */
     fun pause() {
         wakeWordManager?.stop()
         voiceCommandManager?.cancelListening()
@@ -177,45 +165,33 @@ class VoicePipeline(
         state = PipelineState.IDLE
     }
 
-    /**
-     * 释放所有资源
-     */
     fun release() {
         wakeWordManager?.release()
         voiceCommandManager?.release()
         chatEngine?.release()
+        intentClassifier?.release()
         scope.cancel()
         Log.i(TAG, "Pipeline released")
     }
 
     // ==================== 管线流程 ====================
 
-    /**
-     * 唤醒词检测回调
-     */
     private fun onWakeDetected(keyword: String) {
         Log.i(TAG, "Wake detected: $keyword")
         state = PipelineState.WAKE_DETECTED
         callback.onWakeDetected(keyword)
 
-        // 短暂延迟后开始录音（给用户反应时间）
         handler.postDelayed({
             startListening()
         }, 300)
     }
 
-    /**
-     * 开始录音（用户说话）
-     */
     private fun startListening() {
         state = PipelineState.LISTENING
         voiceCommandManager?.startListening()
         Log.i(TAG, "Listening for command...")
     }
 
-    /**
-     * ASR 结果回调
-     */
     private fun onAsrResult(text: String, isFinal: Boolean) {
         callback.onAsrResult(text, isFinal)
 
@@ -230,7 +206,6 @@ class VoicePipeline(
             state = PipelineState.PROCESSING
             Log.i(TAG, "Final ASR: $text, processing...")
 
-            // 在后台线程执行 LLM 意图分类
             scope.launch(Dispatchers.IO) {
                 processIntent(text)
             }
@@ -238,25 +213,28 @@ class VoicePipeline(
     }
 
     /**
-     * LLM 意图分类 + 执行
+     * 意图分类 + 执行
+     * IntentClassifier 内部自动选择 LLM 或关键词模式
      */
     private suspend fun processIntent(userText: String) {
         try {
-            val classifier = intentClassifier
-            if (classifier == null || !classifier.isReady()) {
-                // LLM 不可用，降级为基础处理
-                Log.w(TAG, "LLM not available, using basic fallback")
-                handleBasicFallback(userText)
+            val classifier = intentClassifier ?: run {
+                Log.w(TAG, "Classifier null, fallback")
+                handler.post {
+                    callback.onIntentResult(IntentResult.fallback(userText))
+                    state = PipelineState.SPEAKING
+                    chatEngine?.speak("抱歉，语音助手暂时不可用。")
+                }
                 return
             }
 
-            // 分类意图（MNN-LLM 本地推理）
+            // 分类意图（LLM 或关键词，由 classifier 内部决定）
             val result = classifier.classify(userText)
 
-            Log.i(TAG, "Intent: ${result.intent}/${result.action}")
+            Log.i(TAG, "Intent: ${result.intent}/${result.action} (mode: ${classifier.mode})")
             handler.post { callback.onIntentResult(result) }
 
-            // 根据意图执行动作（切换到主线程处理 UI）
+            // 执行动作
             withContext(Dispatchers.Main) {
                 state = PipelineState.SPEAKING
                 executeIntent(result)
@@ -270,9 +248,6 @@ class VoicePipeline(
         }
     }
 
-    /**
-     * 执行意图
-     */
     private fun executeIntent(result: IntentResult) {
         val chatEng = chatEngine ?: return
 
@@ -280,7 +255,6 @@ class VoicePipeline(
             handler.post { callback.onUiCommand(uiCommand) }
         }
 
-        // TTS 完成后回到 IDLE 状态
         chatEng.setOnTtsDoneListener {
             handler.post {
                 state = PipelineState.IDLE
@@ -288,45 +262,11 @@ class VoicePipeline(
             }
         }
 
-        // 兜底：如果 TTS 没有触发（文本太短或 TTS 不可用），5秒后回到 IDLE
+        // 兜底：5秒后回到 IDLE
         handler.postDelayed({
             if (state == PipelineState.SPEAKING) {
                 state = PipelineState.IDLE
             }
         }, 5000)
-    }
-
-    /**
-     * 基础降级处理 — LLM 不可用时的简单关键词匹配
-     */
-    private fun handleBasicFallback(userText: String) {
-        val result = when {
-            userText.contains("导航") || userText.contains("去哪") || userText.contains("路线") -> {
-                val keyword = userText.replace(Regex(".*(?:导航|去|路线)"), "").trim()
-                IntentResult(IntentResult.INTENT_NAVIGATION, "search_poi",
-                    mapOf("keyword" to keyword), userText)
-            }
-            userText.contains("搜索") || userText.contains("查") || userText.contains("搜") -> {
-                val query = userText.replace(Regex(".*(?:搜索|查|搜)"), "").trim()
-                IntentResult(IntentResult.INTENT_SEARCH, "web_search",
-                    mapOf("query" to query), userText)
-            }
-            userText.contains("镜像") -> {
-                val action = if (userText.contains("关") || userText.contains("停")) "mirror_off" else "mirror_toggle"
-                IntentResult(IntentResult.INTENT_HUD_CONTROL, action, emptyMap(), userText)
-            }
-            userText.contains("播放") || userText.contains("音乐") -> {
-                IntentResult(IntentResult.INTENT_MUSIC, "play", emptyMap(), userText)
-            }
-            else -> {
-                IntentResult.fallback(userText)
-            }
-        }
-
-        handler.post {
-            callback.onIntentResult(result)
-            state = PipelineState.SPEAKING
-            executeIntent(result)
-        }
     }
 }
