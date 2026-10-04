@@ -87,7 +87,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private var wakeWordManager: WakeWordManager? = null
     private var wakeWordEnabled = false
 
-    // === 唤醒反馈 UI（在 flipContainer 外面，不受镜像影响） ===
+    // === 唤醒反馈 UI（通过 scaleY 跟随镜像同步翻转） ===
     private lateinit var wakeFeedback: FrameLayout
     private lateinit var wakeFeedbackPanel: LinearLayout
     private lateinit var wakeFeedbackKeyword: TextView
@@ -357,9 +357,19 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         }
 
         // 双击切换镜像
+        // 初始化：镜像默认开启，唤醒反馈面板也需要同步翻转
+        wakeFeedback.pivotY = wakeFeedback.height / 2f.takeIf { it > 0 } ?: 0f
+        wakeFeedback.post {
+            wakeFeedback.pivotY = wakeFeedback.height / 2f
+            wakeFeedback.scaleY = if (hudView.mirrorEnabled) -1f else 1f
+        }
+
         gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onDoubleTap(e: MotionEvent): Boolean {
                 hudView.mirrorEnabled = !hudView.mirrorEnabled
+                // 唤醒反馈面板跟随镜像垂直翻转
+                wakeFeedback.pivotY = wakeFeedback.height / 2f
+                wakeFeedback.scaleY = if (hudView.mirrorEnabled) -1f else 1f
                 val state = if (hudView.mirrorEnabled) "镜像 ON" else "镜像 OFF"
                 Toast.makeText(this@MainActivity, state, Toast.LENGTH_SHORT).show()
                 Log.i(TAG, "Mirror toggled: ${hudView.mirrorEnabled}")

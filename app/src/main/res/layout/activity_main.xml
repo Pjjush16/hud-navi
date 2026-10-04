@@ -18,7 +18,7 @@
 
     </FrameLayout>
 
-    <!-- 唤醒词反馈面板（在 flipContainer 外面，不受镜像影响） -->
+    <!-- 唤醒词反馈面板（通过 scaleY 跟随镜像同步翻转） -->
     <FrameLayout
         android:id="@+id/wakeFeedback"
         android:layout_width="match_parent"
