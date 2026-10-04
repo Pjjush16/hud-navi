@@ -1,14 +1,13 @@
 /*
- * WakeWordManager.kt - 语音唤醒词识别管理器 (v12.9)
+ * WakeWordManager.kt - 语音唤醒词识别管理器 (v13.0 Siri-style)
  *
- * 修复核心问题：音频被切成碎片导致唤醒词识别率极低
+ * 对标 Apple Siri 唤醒检测的设计哲学：
  *
- * v12.9 改动：
- * 1. chunk 从 100ms 增大到 200ms（3200 samples），每次喂够足够音频
- * 2. 不再在每次检测后重建 stream（丢失上下文是"剪成两半"的元凶）
- * 3. 先积累 500ms 音频再开始 decode，确保模型有足够上下文
- * 4. 添加能量检测，静音时跳过 decode 节省算力
- * 5. 增加更多声调变体和常见误读
+ * 1. 持续滚动缓冲：永不定时重置 stream，模型自己管理滑动窗口上下文
+ * 2. 小读大批：50ms 读取（低延迟），攒够 150ms 再 decode（够上下文）
+ * 3. 自适应噪声门限：动态计算背景噪声基线，阈值 = 噪声 × 3
+ * 4. 仅在长时间静音后才重置 stream（>3秒无人说话）
+ * 5. 冷却机制防重复触发，不靠重建 stream 来去重
  *
  * 模型: sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile
  */
@@ -44,16 +43,24 @@ class WakeWordManager(
         private const val TAG = "WakeWord"
         private const val SAMPLE_RATE = 16000
 
-        // 200ms chunk（之前 100ms 太小，"哈德"约 400-600ms，100ms 只看到 1/4 就被 decode）
-        private const val CHUNK_MS = 200
-        private const val CHUNK_SAMPLES = SAMPLE_RATE * CHUNK_MS / 1000 // 3200
+        // ===== Siri-style 音频参数 =====
+        // 小读：50ms 一次 read，保证低延迟，不丢音频
+        private const val READ_MS = 50
+        private const val READ_SAMPLES = SAMPLE_RATE * READ_MS / 1000 // 800 samples
 
-        // 最少积累 500ms 音频再开始 decode（确保模型看到完整音节）
-        private const val MIN_AUDIO_MS = 500
-        private const val MIN_CHUNKS_BEFORE_DECODE = MIN_AUDIO_MS / CHUNK_MS // 3 个 chunk = 600ms
+        // 大批：攒够 150ms（3 个 read）再喂给模型 + decode
+        // "哈德"约 400-600ms，150ms 够看到 1/3~1/4 个词，模型内部滑动窗口补全上下文
+        private const val BATCH_MS = 150
+        private const val BATCH_READS = BATCH_MS / READ_MS  // 3 reads per batch
 
-        // 能量阈值：低于此值的 chunk 视为静音，跳过 decode
-        private const val ENERGY_THRESHOLD = 0.005f
+        // 静音判定：连续静音超过此时间才重置 stream（3秒）
+        private const val SILENCE_RESET_MS = 3000L
+        private const val SILENCE_RESET_READS = (SILENCE_RESET_MS / READ_MS).toInt() // 60 reads
+
+        // 自适应噪声门限
+        private const val NOISE_HISTORY_SIZE = 200  // 跟踪最近 200 个 read 的 RMS（约 10 秒）
+        private const val NOISE_GATE_MULTIPLIER = 3.0f  // 阈值 = 噪声基线 × 3
+        private const val MIN_ENERGY_FLOOR = 0.002f  // 绝对最低门限（防止死寂环境误触发）
 
         private const val ASSET_DIR = "kws"
         private const val ENCODER_FILE = "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx"
@@ -63,7 +70,7 @@ class WakeWordManager(
         private const val KEYWORDS_FILE = "keywords.txt"
 
         private const val MODEL_DIR = "kws_models"
-        private const val ASSETS_VERSION = 4  // 每次更新 keywords.txt 时递增
+        private const val ASSETS_VERSION = 5  // 每次更新 keywords.txt 时递增
     }
 
     private var audioRecord: AudioRecord? = null
@@ -76,9 +83,9 @@ class WakeWordManager(
 
     private var spotter: KeywordSpotter? = null
 
-    // 冷却机制：防止同一次唤醒词触发多次
+    // 冷却机制
     private var lastWakeTime = 0L
-    private val WAKE_COOLDOWN_MS = 1500L  // 1.5 秒冷却（之前 2 秒太长）
+    private val WAKE_COOLDOWN_MS = 1500L
 
     fun init() {
         initError = null
@@ -88,7 +95,6 @@ class WakeWordManager(
 
             val modelFiles = listOf(ENCODER_FILE, DECODER_FILE, JOINER_FILE, TOKENS_FILE, KEYWORDS_FILE)
 
-            // 版本检查：ASSETS_VERSION 递增时强制重新释放所有模型文件
             val versionFile = File(modelDir, "assets_version")
             val currentVersion = if (versionFile.exists()) versionFile.readText().trim().toIntOrNull() ?: 0 else 0
             if (currentVersion < ASSETS_VERSION) {
@@ -97,7 +103,6 @@ class WakeWordManager(
             }
 
             val missingFiles = mutableListOf<String>()
-
             for (fileName in modelFiles) {
                 val target = File(modelDir, fileName)
                 if (!target.exists() || target.length() < 100) {
@@ -125,12 +130,6 @@ class WakeWordManager(
             Log.i(TAG, "All 5 model files present in $modelDir")
             versionFile.writeText(ASSETS_VERSION.toString())
 
-            val encoderPath = File(modelDir, ENCODER_FILE).absolutePath
-            val decoderPath = File(modelDir, DECODER_FILE).absolutePath
-            val joinerPath = File(modelDir, JOINER_FILE).absolutePath
-            val tokensPath = File(modelDir, TOKENS_FILE).absolutePath
-            val keywordsPath = File(modelDir, KEYWORDS_FILE).absolutePath
-
             val config = KeywordSpotterConfig(
                 featConfig = FeatureConfig(
                     sampleRate = SAMPLE_RATE,
@@ -138,24 +137,24 @@ class WakeWordManager(
                 ),
                 modelConfig = OnlineModelConfig(
                     transducer = OnlineTransducerModelConfig(
-                        encoder = encoderPath,
-                        decoder = decoderPath,
-                        joiner = joinerPath
+                        encoder = File(modelDir, ENCODER_FILE).absolutePath,
+                        decoder = File(modelDir, DECODER_FILE).absolutePath,
+                        joiner = File(modelDir, JOINER_FILE).absolutePath
                     ),
-                    tokens = tokensPath,
+                    tokens = File(modelDir, TOKENS_FILE).absolutePath,
                     numThreads = 2,
                     debug = false,
                     provider = "cpu"
                 ),
-                keywordsFile = keywordsPath,
+                keywordsFile = File(modelDir, KEYWORDS_FILE).absolutePath,
                 keywordsScore = 3.0f,
-                keywordsThreshold = 0.05f,  // 进一步降低阈值（之前 0.08 仍然偏严格）
+                keywordsThreshold = 0.05f,
                 numTrailingBlanks = 1
             )
 
             Log.i(TAG, "Creating KeywordSpotter...")
             spotter = KeywordSpotter(assetManager = null, config = config)
-            Log.i(TAG, "KeywordSpotter created successfully!")
+            Log.i(TAG, "KeywordSpotter created!")
 
             kwsReady = true
         } catch (e: Exception) {
@@ -166,51 +165,19 @@ class WakeWordManager(
     }
 
     fun start() {
-        if (!kwsReady) {
-            Log.w(TAG, "KWS not ready: ${initError ?: "unknown"}")
-            return
-        }
+        if (!kwsReady) return
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
-            != PackageManager.PERMISSION_GRANTED) {
-            Log.w(TAG, "RECORD_AUDIO not granted")
-            return
-        }
+            != PackageManager.PERMISSION_GRANTED) return
         if (running.get()) return
         running.set(true)
 
-        val bufferSize = AudioRecord.getMinBufferSize(
-            SAMPLE_RATE,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT
-        ).coerceAtLeast(CHUNK_SAMPLES * 4) // 至少 4 倍 chunk 大小的缓冲区
-
-        audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.VOICE_RECOGNITION, // 用 VOICE_RECOGNITION 而非 MIC，跳过系统降噪
-            SAMPLE_RATE,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT,
-            bufferSize
-        )
-
-        if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-            Log.e(TAG, "AudioRecord init failed, trying MIC fallback...")
-            // 降级到 MIC
-            audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
-                SAMPLE_RATE,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                bufferSize
-            )
-            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-                Log.e(TAG, "AudioRecord MIC fallback also failed")
-                running.set(false)
-                return
-            }
+        createAndStartAudioRecord()
+        if (audioRecord == null) {
+            running.set(false)
+            return
         }
 
-        audioRecord?.startRecording()
-        Log.i(TAG, "Listening started: chunk=${CHUNK_MS}ms, min_decode=${MIN_CHUNKS_BEFORE_DECODE} chunks, energy_threshold=$ENERGY_THRESHOLD")
+        Log.i(TAG, "Siri-style listening: read=${READ_MS}ms, batch=${BATCH_MS}ms, silence_reset=${SILENCE_RESET_MS}ms")
 
         listenThread = Thread { listenLoop() }.apply {
             name = "WakeWordThread"
@@ -239,59 +206,101 @@ class WakeWordManager(
 
     fun isReady(): Boolean = kwsReady
 
+    // ==================== 核心：Siri 风格的持续监听循环 ====================
+
     private fun listenLoop() {
-        val buffer = ShortArray(CHUNK_SAMPLES)
-        var chunkCount = 0L
+        val readBuf = ShortArray(READ_SAMPLES)
+        // 批量缓冲区：攒够 BATCH_READS 个 read 再一起喂给模型
+        val batchBuf = FloatArray(READ_SAMPLES * BATCH_READS)
+        var batchIndex = 0
+
+        var totalReads = 0L
         var lastLogTime = System.currentTimeMillis()
         var consecutiveEmptyReads = 0
-        var stream: OnlineStream = spotter!!.createStream()
-        var chunksSinceLastReset = 0  // 跟踪 stream 积累了多少 chunk
+        var consecutiveSilentReads = 0
 
-        Log.i(TAG, "Listen loop started, stream created")
+        // 自适应噪声基线
+        val noiseHistory = FloatArray(NOISE_HISTORY_SIZE)
+        var noiseHistoryIndex = 0
+        var noiseHistoryCount = 0
+        var noiseFloor = MIN_ENERGY_FLOOR  // 初始值
+
+        // 创建 stream — 整个会话期间只在长时间静音后才重建
+        var stream = spotter!!.createStream()
+
+        Log.i(TAG, "Listen loop started")
 
         try {
             while (running.get()) {
-                // 读取 200ms 音频
-                val readCount = audioRecord?.read(buffer, 0, CHUNK_SAMPLES) ?: 0
+                // ---- 读取 50ms 音频 ----
+                val readCount = audioRecord?.read(readBuf, 0, READ_SAMPLES) ?: 0
                 if (readCount <= 0) {
                     consecutiveEmptyReads++
-                    if (consecutiveEmptyReads > 250) { // 250 * 200ms = 50 秒无数据
-                        Log.w(TAG, "Microphone dead for 50s, recreating AudioRecord...")
+                    if (consecutiveEmptyReads > 1000) { // 50 秒无数据
+                        Log.w(TAG, "Microphone dead for 50s, recreating...")
                         recreateAudioRecord()
                         stream = spotter!!.createStream()
-                        chunksSinceLastReset = 0
+                        batchIndex = 0
                         consecutiveEmptyReads = 0
+                        consecutiveSilentReads = 0
                     }
                     continue
                 }
                 consecutiveEmptyReads = 0
-                chunkCount++
-                chunksSinceLastReset++
+                totalReads++
 
-                // 转为 float 并计算 RMS 能量
-                val floatBuf = FloatArray(readCount)
+                // ---- 转 float + 计算 RMS ----
                 var sumSquares = 0.0
                 for (i in 0 until readCount) {
-                    floatBuf[i] = buffer[i].toFloat() / 32768.0f
-                    sumSquares += (floatBuf[i] * floatBuf[i]).toDouble()
+                    val sample = readBuf[i].toFloat() / 32768.0f
+                    batchBuf[batchIndex * READ_SAMPLES + i] = sample
+                    sumSquares += (sample * sample).toDouble()
                 }
                 val rms = sqrt(sumSquares / readCount).toFloat()
 
-                // 静音跳过（节省算力，但不重置 stream）
-                if (rms < ENERGY_THRESHOLD) {
+                // ---- 更新噪声基线（自适应） ----
+                noiseHistory[noiseHistoryIndex] = rms
+                noiseHistoryIndex = (noiseHistoryIndex + 1) % NOISE_HISTORY_SIZE
+                if (noiseHistoryCount < NOISE_HISTORY_SIZE) noiseHistoryCount++
+
+                if (noiseHistoryCount >= 20) {
+                    // 取最近 N 个 RMS 的中位数作为噪声基线
+                    val sorted = noiseHistory.copyOf(noiseHistoryCount).apply { sort() }
+                    val median = sorted[noiseHistoryCount / 2]
+                    // 平滑更新（防止跳变）
+                    noiseFloor = noiseFloor * 0.9f + (median * NOISE_GATE_MULTIPLIER) * 0.1f
+                    if (noiseFloor < MIN_ENERGY_FLOOR) noiseFloor = MIN_ENERGY_FLOOR
+                }
+
+                // ---- 静音判定 ----
+                if (rms < noiseFloor) {
+                    consecutiveSilentReads++
+                    // 长时间静音 → 重置 stream（防止内存膨胀）
+                    if (consecutiveSilentReads >= SILENCE_RESET_READS) {
+                        Log.d(TAG, "Silence ${consecutiveSilentReads * READ_MS}ms, resetting stream")
+                        stream = spotter!!.createStream()
+                        batchIndex = 0
+                        consecutiveSilentReads = 0
+                    }
+                    batchIndex = 0  // 静音时不积累，但也不重建 stream
                     continue
                 }
 
-                // 喂给模型
-                stream.acceptWaveform(floatBuf, SAMPLE_RATE)
+                // ---- 有声 → 重置静音计数 ----
+                consecutiveSilentReads = 0
+                batchIndex++
 
-                // 至少积累 MIN_CHUNKS_BEFORE_DECODE 个 chunk 再 decode
-                // 这是关键修复：之前 100ms 就 decode，"哈德"被切成两半
-                if (chunksSinceLastReset < MIN_CHUNKS_BEFORE_DECODE) {
-                    continue
-                }
+                // ---- 攒够一个 batch 再喂给模型 ----
+                if (batchIndex < BATCH_READS) continue
 
-                // decode 并检查关键词
+                // 把 batch 中的所有音频一次性喂给 stream
+                val totalSamples = batchIndex * READ_SAMPLES
+                val audioSlice = FloatArray(totalSamples)
+                System.arraycopy(batchBuf, 0, audioSlice, 0, totalSamples)
+                stream.acceptWaveform(audioSlice, SAMPLE_RATE)
+                batchIndex = 0
+
+                // ---- decode 并检查关键词 ----
                 while (spotter!!.isReady(stream)) {
                     spotter!!.decode(stream)
                     val result: KeywordSpotterResult = spotter!!.getResult(stream)
@@ -300,51 +309,37 @@ class WakeWordManager(
                         val now = System.currentTimeMillis()
                         if (now - lastWakeTime >= WAKE_COOLDOWN_MS) {
                             lastWakeTime = now
-                            Log.i(TAG, "[WAKE] '$keyword' rms=$rms chunks=$chunksSinceLastReset")
+                            Log.i(TAG, "[WAKE] '$keyword' rms=$rms floor=$noiseFloor reads=$totalReads")
                             onWake(keyword.trim())
-                        } else {
-                            Log.d(TAG, "[WAKE-SKIP] '$keyword' cooldown ${now - lastWakeTime}ms")
                         }
-                        // ★ 关键修复：不重建 stream！
-                        // 之前的 stream = spotter.createStream() 会把积累的音频上下文全部丢失，
-                        // 导致用户连续说两次"哈德"时第二次开头被截断。
-                        // 冷却机制已经防止了重复触发，不需要靠重建 stream 来去重。
+                        // ★ 不重建 stream！让模型保持上下文
                         break
                     }
                 }
 
-                // 如果 stream 积累了太多音频（超过 5 秒），定期重建防止内存膨胀
-                if (chunksSinceLastReset > 25) { // 25 * 200ms = 5 秒
-                    Log.d(TAG, "Stream accumulated ${chunksSinceLastReset} chunks, refreshing")
-                    stream = spotter!!.createStream()
-                    chunksSinceLastReset = 0
-                }
-
-                // 心跳日志（每 15 秒一次）
+                // ---- 心跳日志 ----
                 val now = System.currentTimeMillis()
                 if (now - lastLogTime > 15000) {
-                    Log.i(TAG, "Heartbeat: $chunkCount chunks, rms=$rms, stream_age=$chunksSinceLastReset, running=${running.get()}")
+                    Log.i(TAG, "Heartbeat: reads=$totalReads, floor=$noiseFloor, rms=$rms, running=${running.get()}")
                     lastLogTime = now
                 }
             }
-            Log.i(TAG, "Listen loop exited normally, total chunks: $chunkCount")
+            Log.i(TAG, "Listen loop exited, total reads: $totalReads")
         } catch (e: InterruptedException) {
-            Log.i(TAG, "Listen loop interrupted (normal stop)")
+            Log.i(TAG, "Listen loop interrupted (normal)")
         } catch (e: Exception) {
             Log.e(TAG, "Listen error: ${e.javaClass.simpleName}: ${e.message}", e)
         }
     }
 
-    private fun recreateAudioRecord() {
-        try { audioRecord?.stop() } catch (_: Exception) {}
-        try { audioRecord?.release() } catch (_: Exception) {}
-
+    private fun createAndStartAudioRecord() {
         val bufferSize = AudioRecord.getMinBufferSize(
             SAMPLE_RATE,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT
-        ).coerceAtLeast(CHUNK_SAMPLES * 4)
+        ).coerceAtLeast(READ_SAMPLES * 8)  // 8 倍 read 大小的缓冲区
 
+        // 优先用 VOICE_RECOGNITION（跳过系统降噪，保留原始音频）
         audioRecord = AudioRecord(
             MediaRecorder.AudioSource.VOICE_RECOGNITION,
             SAMPLE_RATE,
@@ -352,11 +347,30 @@ class WakeWordManager(
             AudioFormat.ENCODING_PCM_16BIT,
             bufferSize
         )
+
+        if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+            Log.w(TAG, "VOICE_RECOGNITION failed, trying MIC fallback...")
+            audioRecord = AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                bufferSize
+            )
+        }
+
         if (audioRecord?.state == AudioRecord.STATE_INITIALIZED) {
             audioRecord?.startRecording()
-            Log.i(TAG, "AudioRecord recreated")
         } else {
-            Log.e(TAG, "AudioRecord recreation failed!")
+            Log.e(TAG, "AudioRecord init failed completely!")
+            audioRecord = null
         }
+    }
+
+    private fun recreateAudioRecord() {
+        try { audioRecord?.stop() } catch (_: Exception) {}
+        try { audioRecord?.release() } catch (_: Exception) {}
+        createAndStartAudioRecord()
+        Log.i(TAG, "AudioRecord recreated: ${audioRecord?.state}")
     }
 }
