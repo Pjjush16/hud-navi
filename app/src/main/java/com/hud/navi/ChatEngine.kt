@@ -235,9 +235,10 @@ class ChatEngine(
 
     /**
      * 聊天意图 — 自由对话，LLM 生成回复 + TTS 播报
+     * 支持 Function Calling：模型可自动调用 web_search 联网搜索
      */
     private fun handleChat(result: IntentResult, callback: ((String) -> Unit)?) {
-        // 如果模型已经生成了回复文本，直接播报
+        // 如果模型已经生成了回复文本（分类阶段直接给出），直接播报
         val text = result.params["text"] as? String
         if (!text.isNullOrBlank()) {
             speak(truncateForTts(text))
@@ -245,12 +246,13 @@ class ChatEngine(
             return
         }
 
-        // 否则用聊天模式重新生成回复（云端 API）
+        // 用 Function Calling 模式生成回复（云端 API + 联网搜索工具）
         callback?.invoke("让我想想...")
         speak("让我想想...")
         Thread {
             val reply = kotlinx.coroutines.runBlocking {
-                intentClassifier.chat(result.rawText)
+                // 使用原始用户输入（而非 API 响应）
+                intentClassifier.chat(result.userInput.ifBlank { result.rawText })
             }
             speak(truncateForTts(reply))
             callback?.invoke(reply)  // UI 显示完整回复

@@ -76,19 +76,19 @@ class VoicePipeline(
             errors.add("唤醒词: ${e.message}")
         }
 
-        // 2. 意图分类器（智谱 API + 关键词降级）
-        try {
-            intentClassifier = IntentClassifier(context)
-            Log.i(TAG, "IntentClassifier mode: ${intentClassifier?.mode ?: "unknown"}")
-        } catch (e: Exception) {
-            errors.add("意图分类: ${e.message}")
-        }
-
-        // 3. 搜索引擎
+        // 2. 搜索引擎（先创建，IntentClassifier 需要它做 Function Calling）
         try {
             webSearchClient = WebSearchClient()
         } catch (e: Exception) {
             errors.add("搜索引擎: ${e.message}")
+        }
+
+        // 3. 意图分类器（智谱 API + Function Calling 联网搜索 + 关键词降级）
+        try {
+            intentClassifier = IntentClassifier(context, webSearchClient)
+            Log.i(TAG, "IntentClassifier mode: ${intentClassifier?.mode ?: "unknown"}, search=${webSearchClient != null}")
+        } catch (e: Exception) {
+            errors.add("意图分类: ${e.message}")
         }
 
         // 4. 聊天引擎 + TTS
@@ -196,6 +196,6 @@ class VoicePipeline(
         chatEng.setOnTtsDoneListener {
             handler.post { state = PipelineState.IDLE }
         }
-        handler.postDelayed({ if (state == PipelineState.SPEAKING) state = PipelineState.IDLE }, 5000)
+        handler.postDelayed({ if (state == PipelineState.SPEAKING) state = PipelineState.IDLE }, 30000)
     }
 }
