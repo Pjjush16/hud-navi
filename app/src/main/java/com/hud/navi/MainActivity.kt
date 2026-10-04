@@ -83,15 +83,20 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     // === 双击手势（切换镜像） ===
     private lateinit var gestureDetector: GestureDetector
 
-    // === 语音唤醒词 ===
-    private var wakeWordManager: WakeWordManager? = null
+    // === 语音交互管线 (v11.0) ===
+    private var voicePipeline: VoicePipeline? = null
     private var wakeWordEnabled = false
+    private var pipelineReady = false
 
     // === 唤醒反馈 UI（通过 scaleY 跟随镜像同步翻转） ===
     private lateinit var wakeFeedback: FrameLayout
     private lateinit var wakeFeedbackPanel: LinearLayout
     private lateinit var wakeFeedbackKeyword: TextView
     private var wakeFeedbackHideRunnable: Runnable? = null
+
+    // === 语音状态指示 ===
+    private var isProcessing = false
+    private var isSpeaking = false
 
     // === GPS 目标 ===
     private var targetLat = 0.0; private var targetLng = 0.0
@@ -395,23 +400,103 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     }
 
     private fun initWakeWord() {
+        // v11.0: 使用 VoicePipeline 统一管理语音交互
         try {
-            wakeWordManager = WakeWordManager(this) { keyword ->
-                Log.i(TAG, "Wake word detected: $keyword")
-                handler.post { showWakeFeedback(keyword) }
-            }
-            wakeWordManager?.init()
-            if (wakeWordManager?.isReady() == true) {
+            voicePipeline = VoicePipeline(this, object : VoicePipelineCallback {
+                override fun onStateChanged(state: PipelineState) {
+                    handler.post {
+                        isProcessing = state == PipelineState.PROCESSING
+                        isSpeaking = state == PipelineState.SPEAKING
+
+                        // 更新状态文本
+                        val stateText = when (state) {
+                            PipelineState.LISTENING -> "🎤 正在听..."
+                            PipelineState.PROCESSING -> "🧠 思考中..."
+                            PipelineState.SPEAKING -> "🔊 回复中..."
+                            else -> null
+                        }
+                        if (stateText != null) {
+                            wakeFeedbackKeyword.text = stateText
+                            wakeFeedback.visibility = View.VISIBLE
+                        }
+                    }
+                }
+
+                override fun onWakeDetected(keyword: String) {
+                    handler.post { showWakeFeedback(keyword) }
+                }
+
+                override fun onAsrResult(text: String, isFinal: Boolean) {
+                    handler.post {
+                        if (text.isNotBlank()) {
+                            wakeFeedbackKeyword.text = if (isFinal) "📝 $text" else "💬 $text..."
+                        }
+                    }
+                }
+
+                override fun onIntentResult(result: IntentResult) {
+                    Log.i(TAG, "Intent result: ${result.intent}/${result.action}")
+                }
+
+                override fun onUiCommand(command: String) {
+                    handler.post { handleUiCommand(command) }
+                }
+
+                override fun onChatResponse(text: String) {
+                    handler.post {
+                        wakeFeedbackKeyword.text = text.take(30)
+                    }
+                }
+
+                override fun onError(message: String) {
+                    handler.post {
+                        Log.w(TAG, "Pipeline error: $message")
+                        Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show()
+                    }
+                }
+            })
+
+            voicePipeline?.init()
+            pipelineReady = voicePipeline?.pipelineReady == true
+
+            if (pipelineReady) {
                 wakeWordEnabled = true
-                Log.i(TAG, "Wake word engine ready")
-                Toast.makeText(this, "语音唤醒已就绪：哈德/小哈", Toast.LENGTH_SHORT).show()
+                Log.i(TAG, "Voice pipeline ready")
+                Toast.makeText(this, "语音助手已就绪：说\"哈德\"唤醒", Toast.LENGTH_SHORT).show()
             } else {
-                Log.w(TAG, "Wake word engine not ready (model files missing)")
-                val errMsg = wakeWordManager?.initError ?: "未知原因"
-                Toast.makeText(this, "语音唤醒未就绪: $errMsg", Toast.LENGTH_LONG).show()
+                val errMsg = voicePipeline?.initError ?: "部分模块未就绪"
+                Log.w(TAG, "Pipeline partial init: $errMsg")
+                Toast.makeText(this, "语音助手部分就绪: $errMsg", Toast.LENGTH_LONG).show()
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Wake word init failed: ${e.message}")
+            Log.e(TAG, "Pipeline init failed: ${e.message}", e)
+            Toast.makeText(this, "语音助手初始化失败", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /**
+     * 处理 UI 指令 — 从 ChatEngine 传过来的命令
+     */
+    private fun handleUiCommand(command: String) {
+        when {
+            command == "MIRROR_TOGGLE" -> {
+                hudView.mirrorEnabled = !hudView.mirrorEnabled
+                wakeFeedback.pivotY = wakeFeedback.height / 2f
+                wakeFeedback.scaleY = if (hudView.mirrorEnabled) -1f else 1f
+            }
+            command == "MIRROR_OFF" -> {
+                hudView.mirrorEnabled = false
+                wakeFeedback.pivotY = wakeFeedback.height / 2f
+                wakeFeedback.scaleY = 1f
+            }
+            command.startsWith("🔍") -> {
+                // 搜索中，显示搜索关键词
+                wakeFeedbackKeyword.text = command
+            }
+            else -> {
+                // 其他指令，显示文本
+                wakeFeedbackKeyword.text = command.take(30)
+            }
         }
     }
 
@@ -872,22 +957,21 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         super.onResume()
         startRenderLoop()
         startHudForegroundService()
-        // 启动唤醒词监听（需要 RECORD_AUDIO 权限）
-        if (wakeWordEnabled && ContextCompat.checkSelfPermission(this,
-                Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-            wakeWordManager?.start()
+        // v11.0: 使用 VoicePipeline 管理唤醒词监听
+        if (wakeWordEnabled) {
+            voicePipeline?.start()
         }
     }
 
     override fun onPause() {
         stopRenderLoop()
-        wakeWordManager?.stop()
+        voicePipeline?.pause()
         super.onPause()
     }
 
     override fun onDestroy() {
         stopRenderLoop()
-        wakeWordManager?.release()
+        voicePipeline?.release()
         locationManager.removeUpdates(this)
         sensorManager.unregisterListener(this)
         handler.removeCallbacksAndMessages(null)

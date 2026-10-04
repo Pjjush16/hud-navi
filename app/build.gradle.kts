@@ -11,8 +11,8 @@ android {
         applicationId = "com.hud.navi"
         minSdk = 21
         targetSdk = 34
-        versionCode = 80
-        versionName = "10.29"
+        versionCode = 81
+        versionName = "11.0"
     }
 
     // ABI 分包：输出 arm64-v8a / armeabi-v7a / universal 三个 APK
@@ -68,4 +68,10 @@ dependencies {
     // sherpa-onnx: 离线关键词识别（中文唤醒词）
     // AAR 由 CI workflow 自动下载到 app/libs/
     implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar", "*.jar"))))
+
+    // v11.0: MNN-LLM — 本地 LLM 推理（Qwen2.5-0.5B）
+    // 阿里出品，对 Qwen 系列天然友好
+    // 模型文件需放入 app/src/main/assets/llm/ 目录（MNN 格式）
+    // Maven 仓库待确认，目前通过 Ollama HTTP API 兼容调用
+    // implementation("com.alibaba:MNN-LLM:2.9.0")
 }
