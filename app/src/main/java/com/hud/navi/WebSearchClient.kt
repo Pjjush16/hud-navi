@@ -43,12 +43,12 @@ data class SearchResponse(
      */
     fun toSummary(maxResults: Int = 3): String {
         if (!success || results.isEmpty()) {
-            return "抱歉，没有找到关于"$query"的相关信息。"
+            return "抱歉，没有找到关于${query}的相关信息。"
         }
 
         val topResults = results.take(maxResults)
         return buildString {
-            append("关于"$query"，找到以下信息：")
+            append("关于${query}，找到以下信息：")
             topResults.forEachIndexed { idx, result ->
                 append("\n${idx + 1}. ${result.title}。${result.snippet}")
             }
