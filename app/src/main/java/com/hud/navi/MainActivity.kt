@@ -37,6 +37,7 @@ import android.util.Log
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.View
+import android.view.Gravity
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -88,7 +89,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private var wakeWordEnabled = false
     private var pipelineReady = false
 
-    // === 唤醒反馈 UI（通过 scaleY 跟随镜像同步翻转） ===
+    // === 唤醒反馈 UI（通过 gravity 跟随镜像同步切换位置） ===
     private lateinit var wakeFeedback: FrameLayout
     private lateinit var wakeFeedbackPanel: LinearLayout
     private lateinit var wakeFeedbackKeyword: TextView
@@ -362,18 +363,13 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         }
 
         // 双击切换镜像
-        // 初始化：镜像默认开启，唤醒反馈面板也需要同步翻转
-        wakeFeedback.post {
-            wakeFeedback.pivotY = wakeFeedback.height / 2f
-            wakeFeedback.scaleY = if (hudView.mirrorEnabled) -1f else 1f
-        }
+        // 初始化：镜像默认开启，唤醒反馈面板位置同步（顶部/底部）
+        updateWakeFeedbackMirror()
 
         gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onDoubleTap(e: MotionEvent): Boolean {
                 hudView.mirrorEnabled = !hudView.mirrorEnabled
-                // 唤醒反馈面板跟随镜像垂直翻转
-                wakeFeedback.pivotY = wakeFeedback.height / 2f
-                wakeFeedback.scaleY = if (hudView.mirrorEnabled) -1f else 1f
+                updateWakeFeedbackMirror()
                 val state = if (hudView.mirrorEnabled) "镜像 ON" else "镜像 OFF"
                 Toast.makeText(this@MainActivity, state, Toast.LENGTH_SHORT).show()
                 Log.i(TAG, "Mirror toggled: ${hudView.mirrorEnabled}")
@@ -483,13 +479,11 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         when {
             command == "MIRROR_TOGGLE" -> {
                 hudView.mirrorEnabled = !hudView.mirrorEnabled
-                wakeFeedback.pivotY = wakeFeedback.height / 2f
-                wakeFeedback.scaleY = if (hudView.mirrorEnabled) -1f else 1f
+                updateWakeFeedbackMirror()
             }
             command == "MIRROR_OFF" -> {
                 hudView.mirrorEnabled = false
-                wakeFeedback.pivotY = wakeFeedback.height / 2f
-                wakeFeedback.scaleY = 1f
+                updateWakeFeedbackMirror()
             }
             command.startsWith("🔍") -> {
                 wakeFeedbackKeyword.text = command
@@ -985,8 +979,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
     /**
      * 唤醒词触发后的视觉反馈：
-     * 底部黑色渐变面板上滑 + "我在" + 唤醒词名称
-     * 2秒后自动收回
+     * 镜像模式：顶部面板下滑；正常模式：底部面板上滑
      */
     private fun showWakeFeedback(keyword: String) {
         // 取消之前的隐藏计时器
@@ -995,7 +988,11 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         wakeFeedback.visibility = View.VISIBLE
         wakeFeedbackKeyword.text = keyword
 
-        // 滑入动画：从底部上滑
+        // 设置起始位置：镜像时在屏幕上方外（-120dp），正常时在屏幕下方外（+120dp）
+        val hideOffsetPx = if (hudView.mirrorEnabled) -dpToPx(120) else dpToPx(120)
+        wakeFeedbackPanel.translationY = hideOffsetPx
+
+        // 滑入动画：滑到 translationY=0
         wakeFeedbackPanel.animate()
             .translationY(0f)
             .setDuration(300)
@@ -1016,13 +1013,42 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         wakeFeedbackHideRunnable?.let { handler.removeCallbacks(it) }
         wakeFeedbackHideRunnable = null
 
+        // 镜像时向上滑出（-120dp），正常时向下滑出（+120dp）
+        val hideOffsetPx = if (hudView.mirrorEnabled) -dpToPx(120) else dpToPx(120)
+
         wakeFeedbackPanel.animate()
-            .translationY(120f)
+            .translationY(hideOffsetPx)
             .alpha(0f)
             .setDuration(300)
             .withEndAction {
                 wakeFeedback.visibility = View.GONE
             }
             .start()
+    }
+
+    /**
+     * 镜像模式切换时更新唤醒反馈面板位置
+     * 不再使用 scaleY 翻转（会破坏 translationY 动画），
+     * 改为动态 gravity：镜像时面板在顶部，正常时在底部
+     */
+    private fun updateWakeFeedbackMirror() {
+        val lp = wakeFeedbackPanel.layoutParams as FrameLayout.LayoutParams
+        val hideOffsetPx = if (hudView.mirrorEnabled) {
+            lp.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            -dpToPx(120)
+        } else {
+            lp.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            dpToPx(120)
+        }
+        wakeFeedbackPanel.layoutParams = lp
+        // 如果面板当前不可见，设置隐藏位置的 translationY
+        if (wakeFeedback.visibility != View.VISIBLE) {
+            wakeFeedbackPanel.translationY = hideOffsetPx
+        }
+        Log.i(TAG, "Mirror updated: ${hudView.mirrorEnabled}, panel gravity=${lp.gravity}")
+    }
+
+    private fun dpToPx(dp: Int): Float {
+        return dp * resources.displayMetrics.density
     }
 }
