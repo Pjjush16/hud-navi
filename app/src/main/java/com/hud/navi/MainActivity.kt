@@ -1050,19 +1050,22 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
      */
     private fun updateWakeFeedbackMirror() {
         val lp = wakeFeedbackPanel.layoutParams as FrameLayout.LayoutParams
-        val hideOffsetPx = if (hudView.mirrorEnabled) {
+        if (hudView.mirrorEnabled) {
             lp.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            -dpToPx(120)
+            // 镜像模式：面板在顶部，文字垂直翻转（与 HudView 画面一致）
+            wakeFeedbackPanel.scaleY = -1f
         } else {
             lp.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-            dpToPx(120)
+            // 正常模式：面板在底部，文字正常方向
+            wakeFeedbackPanel.scaleY = 1f
         }
         wakeFeedbackPanel.layoutParams = lp
         // 如果面板当前不可见，设置隐藏位置的 translationY
         if (wakeFeedback.visibility != View.VISIBLE) {
+            val hideOffsetPx = if (hudView.mirrorEnabled) -dpToPx(120) else dpToPx(120)
             wakeFeedbackPanel.translationY = hideOffsetPx
         }
-        Log.i(TAG, "Mirror updated: ${hudView.mirrorEnabled}, panel gravity=${lp.gravity}")
+        Log.i(TAG, "Mirror updated: ${hudView.mirrorEnabled}, panel gravity=${lp.gravity}, scaleY=${wakeFeedbackPanel.scaleY}")
     }
 
     private fun dpToPx(dp: Int): Float {

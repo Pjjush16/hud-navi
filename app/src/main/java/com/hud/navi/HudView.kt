@@ -344,23 +344,12 @@ class HudView @JvmOverloads constructor(
 
     private fun drawSpeedometer(canvas: Canvas, w: Float, h: Float) {
         val cx = w / 2f
+        val speedY = 120f
         val speedStr = vehicleSpeed.toInt().toString()
 
-        // 速度显示位置（镜像坐标系中 y=120 在顶部）
-        val speedY = 120f
-
+        // 速度数字随车标同色
         speedNumPaint.color = getSpeedColor(vehicleSpeed)
-
-        if (mirrorEnabled) {
-            // 抵消垂直镜像，让文字正向可读
-            canvas.save()
-            canvas.scale(1f, -1f, w / 2f, h / 2f)
-            canvas.drawText(speedStr, cx, speedY, speedNumPaint)
-            canvas.drawText("km/h", cx, speedY + 40f, speedUnitPaint)
-            canvas.restore()
-        } else {
-            canvas.drawText(speedStr, cx, speedY, speedNumPaint)
-            canvas.drawText("km/h", cx, speedY + 40f, speedUnitPaint)
-        }
+        canvas.drawText(speedStr, cx, speedY, speedNumPaint)
+        canvas.drawText("km/h", cx, speedY + 40f, speedUnitPaint)
     }
 }
