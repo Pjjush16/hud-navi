@@ -65,14 +65,22 @@ class OnnxWakeWordEngine(
         try {
             env = OrtEnvironment.getEnvironment()
 
-            val opts = OrtSession.SessionOptions().apply {
-                addNnapi()  // Try NNAPI first, fallback to CPU
+            val opts = OrtSession.SessionOptions()
+            // Try NNAPI, fallback to CPU only
+            try {
+                opts.addNnapi()
+                Log.i(TAG, "NNAPI enabled")
+            } catch (e: Exception) {
+                Log.w(TAG, "NNAPI not available, using CPU: ${e.message}")
             }
 
-            // Load models from assets
+            // Load models from assets (one at a time, GC between loads)
             melSession = loadModelFromAssets(MELSPECTROGRAM_MODEL, opts)
+            System.gc()
             embedSession = loadModelFromAssets(EMBEDDING_MODEL, opts)
+            System.gc()
             classifierSession = loadModelFromAssets(CLASSIFIER_MODEL, opts)
+            opts.close()  // Close session options after all models loaded
 
             isReady = true
             Log.i(TAG, "All 3 ONNX models loaded successfully")
@@ -80,13 +88,27 @@ class OnnxWakeWordEngine(
             initError = "${e.javaClass.simpleName}: ${e.message}"
             Log.e(TAG, "Init failed: $initError", e)
             isReady = false
+            // Clean up any partially loaded sessions
+            try { melSession?.close() } catch (_: Exception) {}
+            try { embedSession?.close() } catch (_: Exception) {}
+            try { classifierSession?.close() } catch (_: Exception) {}
+            melSession = null
+            embedSession = null
+            classifierSession = null
         }
     }
 
     private fun loadModelFromAssets(fileName: String, opts: OrtSession.SessionOptions): OrtSession {
         val bytes = context.assets.open("$ASSET_DIR/$fileName").use { it.readBytes() }
-        Log.i(TAG, "Loaded $fileName (${bytes.size} bytes)")
-        return env!!.createSession(bytes, opts)
+        Log.i(TAG, "Loaded $fileName (${bytes.size / 1024} KB)")
+        return try {
+            env!!.createSession(bytes, opts)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to create session for $fileName: ${e.message}")
+            // Retry with default options (no NNAPI)
+            val defaultOpts = OrtSession.SessionOptions()
+            env!!.createSession(bytes, defaultOpts)
+        }
     }
 
     /**
