@@ -229,8 +229,9 @@ class OnnxWakeWordEngine(
 
     private fun computeMelSpectrogram(audio: FloatArray): FloatArray? {
         try {
-            // Input: [1, n_samples]
-            val inputTensor = OnnxTensor.createTensor(env!!, audio, longArrayOf(1, audio.size.toLong()))
+            // Input: [1, n_samples] — use FloatBuffer + shape
+            val buf = FloatBuffer.wrap(audio)
+            val inputTensor = OnnxTensor.createTensor(env!!, buf, longArrayOf(1, audio.size.toLong()))
             val result = melSession!!.run(mapOf("input" to inputTensor))
             val output = result.get("output").get().value as Array<Array<Array<FloatArray>>>
             // Output shape: [1, 1, n_mel_frames, 32]
@@ -270,15 +271,9 @@ class OnnxWakeWordEngine(
 
     private fun computeEmbedding(melFlat: FloatArray): FloatArray? {
         try {
-            // Reshape to [1, 76, 32, 1]
-            val shaped = Array(1) { Array(76) { Array(32) { FloatArray(1) } } }
-            for (i in 0 until 76) {
-                for (j in 0 until 32) {
-                    shaped[0][i][j][0] = melFlat[i * 32 + j]
-                }
-            }
-
-            val inputTensor = OnnxTensor.createTensor(env!!, shaped)
+            // Reshape to [1, 76, 32, 1] using FloatBuffer
+            val buf = FloatBuffer.wrap(melFlat)
+            val inputTensor = OnnxTensor.createTensor(env!!, buf, longArrayOf(1, 76, 32, 1))
             val result = embedSession!!.run(mapOf("input_1" to inputTensor))
             // Output: [1, 1, 1, 96]
             val output = result.get(0).value as Array<Array<Array<FloatArray>>>
@@ -294,13 +289,13 @@ class OnnxWakeWordEngine(
 
     private fun classify(embeddings: List<FloatArray>): Float {
         try {
-            // Shape: [1, 16, 96]
-            val input = Array(1) { Array(16) { FloatArray(96) } }
+            // Shape: [1, 16, 96] using FloatBuffer
+            val flat = FloatArray(16 * 96)
             for (i in 0 until 16) {
-                System.arraycopy(embeddings[i], 0, input[0][i], 0, 96)
+                System.arraycopy(embeddings[i], 0, flat, i * 96, 96)
             }
-
-            val inputTensor = OnnxTensor.createTensor(env!!, input)
+            val buf = FloatBuffer.wrap(flat)
+            val inputTensor = OnnxTensor.createTensor(env!!, buf, longArrayOf(1, 16, 96))
             val result = classifierSession!!.run(mapOf("input" to inputTensor))
             val output = result.get(0).value as Array<FloatArray>
             val score = output[0][0]
