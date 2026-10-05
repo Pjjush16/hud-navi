@@ -901,7 +901,13 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
     override fun onSensorChanged(event: SensorEvent) {
         when (event.sensor.type) {
-            Sensor.TYPE_ACCELEROMETER -> System.arraycopy(event.values, 0, accData, 0, 3)
+            Sensor.TYPE_ACCELEROMETER -> {
+                System.arraycopy(event.values, 0, accData, 0, 3)
+                // v14.0: 原始加速度计+陀螺仪传给 EKF 做姿态解算
+                if (gyroData[0] != 0f || gyroData[1] != 0f || gyroData[2] != 0f) {
+                    ekf.updateIMU(event.values, gyroData, event.timestamp)
+                }
+            }
             Sensor.TYPE_MAGNETIC_FIELD -> System.arraycopy(event.values, 0, magData, 0, 3)
             Sensor.TYPE_GYROSCOPE -> {
                 System.arraycopy(event.values, 0, gyroData, 0, 3)
@@ -909,8 +915,11 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 gyroHeadingRate = rawRate
                 gyroHeadingRateSmooth += GYRO_SMOOTH * (rawRate - gyroHeadingRateSmooth)
                 lastGyroTime = System.currentTimeMillis()
-                // v12.5: 陀螺仪角速度传给 EKF，GPS 丢失时用于短期航向积分
                 ekf.updateGyroRate(gyroHeadingRateSmooth)
+                // v14.0: 也把陀螺仪数据传给 EKF 做姿态解算
+                if (accData[0] != 0f || accData[1] != 0f || accData[2] != 0f) {
+                    ekf.updateIMU(accData, event.values, event.timestamp)
+                }
             }
             Sensor.TYPE_ROTATION_VECTOR -> {
                 val rotMat = FloatArray(9)
