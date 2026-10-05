@@ -9,7 +9,7 @@ android {
 
     defaultConfig {
         applicationId = "com.hud.navi"
-        minSdk = 21
+        minSdk = 24  // ONNX Runtime 1.18 requires API 24+
         targetSdk = 34
         versionCode = 96
         versionName = "13.1"

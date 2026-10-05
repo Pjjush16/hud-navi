@@ -63,16 +63,24 @@ class OnnxWakeWordEngine(
     fun init() {
         initError = null
         try {
+            // Safety check: verify native library is loadable before touching OrtEnvironment
+            try {
+                System.loadLibrary("onnxruntime4j_jni")
+                Log.i(TAG, "Native library loaded successfully")
+            } catch (e: UnsatisfiedLinkError) {
+                initError = "Native lib missing: ${e.message}"
+                Log.e(TAG, initError, e)
+                isReady = false
+                return
+            }
+
             env = OrtEnvironment.getEnvironment()
 
+            // Use CPU-only options first (most stable), never try NNAPI on first attempt
+            // NNAPI can cause native crashes on some devices that Java try-catch cannot catch
             val opts = OrtSession.SessionOptions()
-            // Try NNAPI, fallback to CPU only
-            try {
-                opts.addNnapi()
-                Log.i(TAG, "NNAPI enabled")
-            } catch (e: Exception) {
-                Log.w(TAG, "NNAPI not available, using CPU: ${e.message}")
-            }
+            opts.setIntraOpNumThreads(2)  // Limit threads to reduce memory pressure
+            opts.setInterOpNumThreads(1)
 
             // Load models from assets (one at a time, GC between loads)
             melSession = loadModelFromAssets(MELSPECTROGRAM_MODEL, opts)
@@ -83,7 +91,7 @@ class OnnxWakeWordEngine(
             opts.close()  // Close session options after all models loaded
 
             isReady = true
-            Log.i(TAG, "All 3 ONNX models loaded successfully")
+            Log.i(TAG, "All 3 ONNX models loaded successfully (CPU mode)")
         } catch (e: Exception) {
             initError = "${e.javaClass.simpleName}: ${e.message}"
             Log.e(TAG, "Init failed: $initError", e)
@@ -92,9 +100,11 @@ class OnnxWakeWordEngine(
             try { melSession?.close() } catch (_: Exception) {}
             try { embedSession?.close() } catch (_: Exception) {}
             try { classifierSession?.close() } catch (_: Exception) {}
+            try { env?.close() } catch (_: Exception) {}
             melSession = null
             embedSession = null
             classifierSession = null
+            env = null
         }
     }
 
