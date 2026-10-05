@@ -218,7 +218,65 @@ class HudView @JvmOverloads constructor(
             canvas.drawPath(roadPath, paint)
         }
 
+        // === 路名标签（仅 PRIMARY 及以上等级道路） ===
+        if (mirrorEnabled) {
+            // 抵消垂直镜像：在路网坐标系中再做一次 Y 翻转，让文字正向
+            canvas.save()
+            canvas.scale(1f, -1f)
+            drawRoadNames(canvas, cx, cy, drawLat, drawLng, metersPerPixel, zoomFactor)
+            canvas.restore()
+        } else {
+            drawRoadNames(canvas, cx, cy, drawLat, drawLng, metersPerPixel, zoomFactor)
+        }
+
         canvas.restore()
+    }
+
+    private val roadNamePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xAAFFFFFF.toInt()
+        textSize = 20f
+        typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+        textAlign = Paint.Align.CENTER
+        setShadowLayer(3f, 0f, 0f, Color.BLACK)
+    }
+
+    private fun drawRoadNames(
+        canvas: Canvas, cx: Float, cy: Float,
+        centerLat: Double, centerLng: Double,
+        metersPerPixel: Double, zoomFactor: Float
+    ) {
+        // 只对 PRIMARY / TRUNK / MOTORWAY 显示路名
+        val nameThreshold = RoadFetcher.RoadType.PRIMARY
+        for (segment in roadSegments) {
+            if (segment.name.isEmpty()) continue
+            if (segment.type.priority < nameThreshold.priority) continue
+            if (segment.points.size < 2) continue
+
+            // 取路段中点
+            val midIdx = segment.points.size / 2
+            val (midLat, midLng) = segment.points[midIdx]
+            val (mx, my) = latLngToPixel(midLat, midLng, centerLat, centerLng, metersPerPixel)
+
+            // 计算路段方向角（用于沿路旋转文字）
+            val p1 = segment.points[midIdx - 1]
+            val p2 = segment.points[minOf(midIdx + 1, segment.points.size - 1)]
+            val (x1, y1) = latLngToPixel(p1.first, p1.second, centerLat, centerLng, metersPerPixel)
+            val (x2, y2) = latLngToPixel(p2.first, p2.second, centerLat, centerLng, metersPerPixel)
+            var angle = Math.toDegrees(atan2(y2 - y1, x2 - x1).toDouble()).toFloat()
+
+            // 保证文字总是正向可读（不 upside down）
+            if (angle > 90f) angle -= 180f
+            if (angle < -90f) angle += 180f
+
+            val fontSize = (segment.type.widthBase * zoomFactor * 0.7f * 2.5f).coerceIn(16f, 32f)
+            roadNamePaint.textSize = fontSize
+
+            canvas.save()
+            canvas.translate(mx, my)
+            canvas.rotate(angle)
+            canvas.drawText(segment.name, 0f, -fontSize * 0.4f, roadNamePaint)
+            canvas.restore()
+        }
     }
 
     private fun latLngToPixel(
@@ -286,12 +344,23 @@ class HudView @JvmOverloads constructor(
 
     private fun drawSpeedometer(canvas: Canvas, w: Float, h: Float) {
         val cx = w / 2f
-        val speedY = 120f
         val speedStr = vehicleSpeed.toInt().toString()
 
-        // 速度数字随车标同色
+        // 速度显示位置（镜像坐标系中 y=120 在顶部）
+        val speedY = 120f
+
         speedNumPaint.color = getSpeedColor(vehicleSpeed)
-        canvas.drawText(speedStr, cx, speedY, speedNumPaint)
-        canvas.drawText("km/h", cx, speedY + 40f, speedUnitPaint)
+
+        if (mirrorEnabled) {
+            // 抵消垂直镜像，让文字正向可读
+            canvas.save()
+            canvas.scale(1f, -1f, w / 2f, h / 2f)
+            canvas.drawText(speedStr, cx, speedY, speedNumPaint)
+            canvas.drawText("km/h", cx, speedY + 40f, speedUnitPaint)
+            canvas.restore()
+        } else {
+            canvas.drawText(speedStr, cx, speedY, speedNumPaint)
+            canvas.drawText("km/h", cx, speedY + 40f, speedUnitPaint)
+        }
     }
 }

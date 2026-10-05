@@ -67,7 +67,8 @@ object RoadFetcher {
 
     data class RoadSegment(
         val type: RoadType,
-        val points: List<Pair<Double, Double>>
+        val points: List<Pair<Double, Double>>,
+        val name: String = ""
     )
 
     enum class RoadType(val priority: Int, val color: Int, val widthBase: Float) {
@@ -154,6 +155,7 @@ object RoadFetcher {
     private fun computeSegmentHash(seg: RoadSegment): String {
         val md = MessageDigest.getInstance("SHA-256")
         md.update(seg.type.name.toByteArray())
+        if (seg.name.isNotEmpty()) md.update(seg.name.toByteArray())
         for ((lat, lng) in seg.points) {
             val latInt = (lat * 100000).toInt()
             val lngInt = (lng * 100000).toInt()
@@ -221,6 +223,7 @@ object RoadFetcher {
         for (seg in segments) {
             val obj = JSONObject()
             obj.put("type", seg.type.name)
+            if (seg.name.isNotEmpty()) obj.put("name", seg.name)
             val ptsArr = org.json.JSONArray()
             for ((plat, plng) in seg.points) {
                 ptsArr.put(plat)
@@ -250,7 +253,8 @@ object RoadFetcher {
             }
 
             if (points.size >= 2) {
-                segments.add(RoadSegment(type, points))
+                val roadName = obj.optString("name", "")
+                segments.add(RoadSegment(type, points, roadName))
             }
         }
 
@@ -375,7 +379,8 @@ object RoadFetcher {
             }
 
             if (points.size >= 2) {
-                segments.add(RoadSegment(roadType, points))
+                val roadName = tags.optString("name", "")
+                segments.add(RoadSegment(roadType, points, roadName))
             }
         }
 
