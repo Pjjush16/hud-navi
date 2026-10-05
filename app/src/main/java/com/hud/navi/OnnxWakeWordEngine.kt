@@ -321,16 +321,67 @@ class OnnxWakeWordEngine(
 
     private fun classify(embeddings: List<FloatArray>): Float {
         try {
-            // Shape: [1, 16, 96] using FloatBuffer
+            // v5 模型: input="float_input" shape=[None, 1536]
+            // 生产模型: input="input" shape=[1, 16, 96]
             val flat = FloatArray(16 * 96)
             for (i in 0 until 16) {
                 System.arraycopy(embeddings[i], 0, flat, i * 96, 96)
             }
+
+            // 检测模型输入名（兼容两种格式）
+            val inputName = classifierSession!!.inputNames.first()
+            val inputTensor: OnnxTensor
+            val shape: LongArray
+
+            if (inputName == "float_input") {
+                // v5: [1, 1536]
+                shape = longArrayOf(1, 1536)
+            } else {
+                // production: [1, 16, 96]
+                shape = longArrayOf(1, 16, 96)
+            }
+
             val buf = FloatBuffer.wrap(flat)
-            val inputTensor = OnnxTensor.createTensor(env!!, buf, longArrayOf(1, 16, 96))
-            val result = classifierSession!!.run(mapOf("input" to inputTensor))
-            val output = result.get(0).value as Array<FloatArray>
-            val score = output[0][0]
+            inputTensor = OnnxTensor.createTensor(env!!, buf, shape)
+            val result = classifierSession!!.run(mapOf(inputName to inputTensor))
+
+            val score: Float = try {
+                // 尝试 v5 格式: output_label (int64) → 0 or 1
+                val label = result.get("output_label")
+                if (label.isPresent) {
+                    val labelValue = label.get().value
+                    when (labelValue) {
+                        is LongArray -> labelValue[0].toFloat()
+                        is Array<*> -> (labelValue[0] as Long).toFloat()
+                        else -> 0f
+                    }
+                } else {
+                    // production 格式: output [1, 1] float
+                    val output = result.get(0).value as Array<FloatArray>
+                    output[0][0]
+                }
+            } catch (e: Exception) {
+                // fallback: 尝试直接读取第一个输出
+                try {
+                    val output = result.get(0).value
+                    when (output) {
+                        is Array<*> -> {
+                            val first = output[0]
+                            when (first) {
+                                is FloatArray -> first[0]
+                                is LongArray -> first[0].toFloat()
+                                is Long -> first.toFloat()
+                                else -> 0f
+                            }
+                        }
+                        else -> 0f
+                    }
+                } catch (e2: Exception) {
+                    Log.w(TAG, "Score parse failed: ${e2.message}")
+                    0f
+                }
+            }
+
             inputTensor.close()
             result.close()
             return score
