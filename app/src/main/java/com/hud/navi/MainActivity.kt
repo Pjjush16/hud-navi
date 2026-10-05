@@ -665,7 +665,11 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             smoothedWorldAcc[1].toDouble() * smoothedWorldAcc[1].toDouble() +
             smoothedWorldAcc[2].toDouble() * smoothedWorldAcc[2].toDouble()
         )
-        ekf.predict(dt, vehicleBearing, targetSpeed * 1000f / 3600f, linearAccelMag)
+        // v13.5: 传入世界坐标系加速度分量（北/东），让 EKF 积分速度
+        // smoothedWorldAcc[0]=North, [1]=East, [2]=Up（已通过旋转矩阵转换）
+        ekf.predict(dt, vehicleBearing, targetSpeed * 1000f / 3600f, linearAccelMag,
+            worldAccN = smoothedWorldAcc[0].toDouble(),
+            worldAccE = smoothedWorldAcc[1].toDouble())
         vehicleLat = ekf.lat; vehicleLng = ekf.lng
 
         val gyroActive = hasGyro && (System.currentTimeMillis() - lastGyroTime) < 500

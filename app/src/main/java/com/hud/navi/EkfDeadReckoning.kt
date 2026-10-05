@@ -200,11 +200,27 @@ class EkfDeadReckoning {
      * @param speedMs GPS speed（m/s）
      * @param linearAccelMag 线性加速度幅度（m/s²），由外部传入
      */
-    fun predict(dtMs: Long, gpsBearingDeg: Float, speedMs: Float, linearAccelMag: Double = 999.0) {
+    fun predict(dtMs: Long, gpsBearingDeg: Float, speedMs: Float, linearAccelMag: Double = 999.0,
+                worldAccN: Double = 0.0, worldAccE: Double = 0.0) {
         if (!initialized) return
 
         val dt = dtMs.toDouble() / 1000.0
         if (dt <= 0.0 || dt > 1.0) return
+
+        // ── v13.5: IMU 加速度积分速度（核心修复）──
+        // 将世界坐标系加速度直接积分到 vN/vE，让速度在 GPS 间隔内实时响应加减速
+        // worldAccN/E 已经是去重力后的纯运动加速度（来自 TYPE_LINEAR_ACCELERATION + 旋转矩阵）
+        vN += worldAccN * dt
+        vE += worldAccE * dt
+        // 从积分后的速度分量直接算合成速度（替代原来从 GPS 速度的 EMA 平滑）
+        val imuSpeed = sqrt(vN * vN + vE * vE)
+        // 保留方向信息（vN/vE 的符号）
+        val headingRad = Math.toRadians(heading)
+        val expectedVN = cos(headingRad)
+        val expectedVE = sin(headingRad)
+        val dotProduct = vN * expectedVN + vE * expectedVE
+        val signedImuSpeed = if (dotProduct >= 0) imuSpeed else -imuSpeed
+        this.speed = signedImuSpeed
 
         // ── 零速检测（ZUPT）──
         // 线性加速度幅度很小 = 车没在加速/减速 = 车是静止的
@@ -260,23 +276,18 @@ class EkfDeadReckoning {
         if (heading < 0) heading += 360
         if (heading >= 360) heading -= 360
 
-        // 速度 EMA 平滑（加速度计确认静止时，GPS 速度不可信）
-        if (!isStationary) {
-            this.speed += 0.3 * (speedMs.toDouble() - this.speed)
-        } else {
-            // 加速度计说车停了 → GPS 报告的速度是噪声，忽略
-            // speed 将在下面的零速衰减中归零
+        // v13.5: GPS 速度仅作为 EKF 校正参考（在 update() 中使用），不再直接覆盖速度
+        // 速度现在完全由 IMU 积分 + GPS 校正驱动（见 predict 开头的 vN += worldAccN * dt）
+        // 仅在 GPS 刚到达且 IMU 积分偏差较大时做软约束
+        val gpsSpeedDiff = abs(speedMs.toDouble() - this.speed)
+        if (gpsSpeedDiff > 5.0 && !isStationary) {
+            // GPS 和 IMU 积分速度差距太大 → 可能是 IMU 漂移，轻轻拉回 GPS 速度
+            this.speed += 0.05 * (speedMs.toDouble() - this.speed)
+            // 重新分解 vN/vE
+            val headingRad2 = Math.toRadians(heading)
+            vN = this.speed * cos(headingRad2)
+            vE = this.speed * sin(headingRad2)
         }
-
-        // 分解速度到北/东
-        val headingRad = Math.toRadians(heading)
-        val targetVN = speed * cos(headingRad)
-        val targetVE = speed * sin(headingRad)
-
-        // 速度平滑
-        val speedAlpha = 0.3
-        vN += speedAlpha * (targetVN - vN)
-        vE += speedAlpha * (targetVE - vE)
 
         // ── 零速强制衰减 ──
         // 加速度计说车停了 → 不管 GPS 给了什么速度，快速衰减到零
