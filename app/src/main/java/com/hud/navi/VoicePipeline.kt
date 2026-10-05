@@ -172,6 +172,7 @@ class VoicePipeline(
         state = PipelineState.WAKE_DETECTED
         callback.onWakeDetected(keyword)
         // 先暂停唤醒词检测，释放 AudioRecord，避免和 ASR 抢麦克风
+        onnxWakeEngine?.stop()
         wakeWordManager?.stop()
         handler.postDelayed({ startListening() }, 500)  // 500ms 等待 AudioRecord 完全释放
     }
@@ -181,14 +182,18 @@ class VoicePipeline(
         voiceCommandManager?.startListening()
     }
 
+    private fun resumeWakeDetection() {
+        onnxWakeEngine?.start()
+        wakeWordManager?.start()
+    }
+
     private fun onAsrResult(text: String, isFinal: Boolean) {
         callback.onAsrResult(text, isFinal)
         if (isFinal) {
             if (text.isBlank()) {
                 chatEngine?.speak("我没有听清，请再说一次")
                 state = PipelineState.IDLE
-                // 重新开始唤醒词检测
-                wakeWordManager?.start()
+                resumeWakeDetection()
                 return
             }
             state = PipelineState.PROCESSING
@@ -212,8 +217,7 @@ class VoicePipeline(
             handler.post {
                 callback.onError("处理失败: ${e.message}")
                 state = PipelineState.IDLE
-                // 出错也要恢复唤醒词检测
-                wakeWordManager?.start()
+                resumeWakeDetection()
             }
         }
     }
@@ -226,14 +230,13 @@ class VoicePipeline(
         chatEng.setOnTtsDoneListener {
             handler.post {
                 state = PipelineState.IDLE
-                // 播报完成后重新开始唤醒词检测
-                wakeWordManager?.start()
+                resumeWakeDetection()
             }
         }
         handler.postDelayed({
             if (state == PipelineState.SPEAKING) {
                 state = PipelineState.IDLE
-                wakeWordManager?.start()
+                resumeWakeDetection()
             }
         }, 30000)
     }
