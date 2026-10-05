@@ -11,8 +11,8 @@ android {
         applicationId = "com.hud.navi"
         minSdk = 21
         targetSdk = 34
-        versionCode = 95
-        versionName = "13.0"
+        versionCode = 96
+        versionName = "13.1"
     }
 
     // ABI 分包
@@ -68,6 +68,9 @@ dependencies {
     implementation("com.google.android.material:material:1.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 
-    // sherpa-onnx: 离线关键词识别（中文唤醒词）
+    // sherpa-onnx: 离线关键词识别（中文唤醒词）— 保留作为备用
     implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar", "*.jar"))))
+
+    // ONNX Runtime: 自训练唤醒词模型推理
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.18.0")
 }

@@ -42,6 +42,7 @@ class VoicePipeline(
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     private var wakeWordManager: WakeWordManager? = null
+    private var onnxWakeEngine: OnnxWakeWordEngine? = null  // v13.1: ONNX 自训练唤醒词
     private var voiceCommandManager: VoiceCommandManager? = null
     private var intentClassifier: IntentClassifier? = null
     private var webSearchClient: WebSearchClient? = null
@@ -63,17 +64,36 @@ class VoicePipeline(
         Log.i(TAG, "Initializing voice pipeline...")
         val errors = mutableListOf<String>()
 
-        // 1. 唤醒词
+        // 1. 唤醒词 — 优先使用 ONNX 自训练模型，失败降级到 sherpa-onnx
         try {
-            wakeWordManager = WakeWordManager(context) { keyword ->
-                handler.post { onWakeDetected(keyword) }
+            onnxWakeEngine = OnnxWakeWordEngine(context) {
+                handler.post { onWakeDetected("哈德哈德") }
             }
-            wakeWordManager?.init()
-            if (wakeWordManager?.isReady() != true) {
-                errors.add("唤醒词: ${wakeWordManager?.initError ?: "未知"}")
+            onnxWakeEngine?.init()
+            if (onnxWakeEngine?.isReady == true) {
+                Log.i(TAG, "ONNX wake word engine ready")
+            } else {
+                Log.w(TAG, "ONNX wake word failed: ${onnxWakeEngine?.initError}, falling back to sherpa-onnx")
+                onnxWakeEngine = null
             }
         } catch (e: Exception) {
-            errors.add("唤醒词: ${e.message}")
+            Log.w(TAG, "ONNX wake word exception: ${e.message}")
+            onnxWakeEngine = null
+        }
+
+        // Fallback: sherpa-onnx KWS
+        if (onnxWakeEngine == null) {
+            try {
+                wakeWordManager = WakeWordManager(context) { keyword ->
+                    handler.post { onWakeDetected(keyword) }
+                }
+                wakeWordManager?.init()
+                if (wakeWordManager?.isReady() != true) {
+                    errors.add("唤醒词: ${wakeWordManager?.initError ?: "未知"}")
+                }
+            } catch (e: Exception) {
+                errors.add("唤醒词: ${e.message}")
+            }
         }
 
         // 2. 搜索引擎（先创建，IntentClassifier 需要它做 Function Calling）
@@ -118,17 +138,20 @@ class VoicePipeline(
 
         pipelineReady = true
         state = PipelineState.IDLE
-        Log.i(TAG, "Pipeline initialized. Wake=${wakeWordManager?.isReady()}, mode=${intentClassifier?.mode}")
+        Log.i(TAG, "Pipeline initialized. ONNX=${onnxWakeEngine?.isReady}, Sherpa=${wakeWordManager?.isReady()}, mode=${intentClassifier?.mode}")
     }
 
     fun start() {
-        if (wakeWordManager?.isReady() == true) {
+        if (onnxWakeEngine?.isReady == true) {
+            onnxWakeEngine?.start()
+        } else if (wakeWordManager?.isReady() == true) {
             wakeWordManager?.start()
-            state = PipelineState.IDLE
         }
+        state = PipelineState.IDLE
     }
 
     fun pause() {
+        onnxWakeEngine?.stop()
         wakeWordManager?.stop()
         voiceCommandManager?.cancelListening()
         chatEngine?.stopSpeaking()
@@ -136,6 +159,7 @@ class VoicePipeline(
     }
 
     fun release() {
+        onnxWakeEngine?.release()
         wakeWordManager?.release()
         voiceCommandManager?.release()
         chatEngine?.release()
