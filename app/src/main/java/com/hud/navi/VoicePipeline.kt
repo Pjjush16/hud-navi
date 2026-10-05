@@ -174,7 +174,7 @@ class VoicePipeline(
         // 先暂停唤醒词检测，释放 AudioRecord，避免和 ASR 抢麦克风
         onnxWakeEngine?.stop()
         wakeWordManager?.stop()
-        handler.postDelayed({ startListening() }, 500)  // 500ms 等待 AudioRecord 完全释放
+        handler.postDelayed({ startListening() }, 800)  // 800ms 等待 AudioRecord 完全释放+新 recognizer 创建
     }
 
     private fun startListening() {

@@ -74,6 +74,7 @@ class VoiceCommandManager(
 
     /**
      * 开始录音（唤醒词触发后调用）
+     * 每次调用都重建 SpeechRecognizer，确保音频管线干净
      */
     fun startListening() {
         if (recording.get()) {
@@ -92,6 +93,23 @@ class VoiceCommandManager(
         hasSpeech = false
         speechStartTime = System.currentTimeMillis()
 
+        // 重建 recognizer — 避免复用导致内部音频状态残留
+        try {
+            recognizer?.cancel()
+            recognizer?.destroy()
+        } catch (_: Exception) {}
+        recognizer = null
+
+        try {
+            recognizer = SpeechRecognizer.createSpeechRecognizer(context)
+            recognizer?.setRecognitionListener(createRecognitionListener())
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to create recognizer: ${e.message}", e)
+            recording.set(false)
+            onResult("语音识别初始化失败", true)
+            return
+        }
+
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.CHINESE.toString())
@@ -103,7 +121,7 @@ class VoiceCommandManager(
 
         try {
             recognizer?.startListening(intent)
-            Log.i(TAG, "Started listening...")
+            Log.i(TAG, "Started listening (fresh recognizer)...")
 
             // 设置最大录音时间
             maxTimer = Runnable {
@@ -116,7 +134,7 @@ class VoiceCommandManager(
         } catch (e: Exception) {
             Log.e(TAG, "startListening failed: ${e.message}", e)
             recording.set(false)
-            onResult("语音识别启动失败", true)
+            onResult("语音识别启动失败: ${e.message}", true)
         }
     }
 
@@ -244,13 +262,10 @@ class VoiceCommandManager(
                 SpeechRecognizer.ERROR_SERVER -> "服务器错误"
                 else -> "未知错误 ($error)"
             }
-            Log.w(TAG, "Recognition error: $errorMsg")
-            // ERROR_NO_MATCH 和 SPEECH_TIMEOUT 不算严重错误
-            if (error != SpeechRecognizer.ERROR_NO_MATCH && error != SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
-                onResult("识别失败: $errorMsg", true)
-            } else {
-                onResult("", true)
-            }
+            Log.w(TAG, "Recognition error: $errorMsg (code=$error)")
+            // NO_MATCH/SPEECH_TIMEOUT → 空文本触发"没听清"
+            // 其他错误 → 也返回空文本，避免错误信息被当作语音指令处理
+            onResult("", true)
         }
 
         override fun onEvent(eventType: Int, params: Bundle?) {}

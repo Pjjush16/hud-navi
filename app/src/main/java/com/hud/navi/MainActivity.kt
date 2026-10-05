@@ -405,6 +405,10 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                         isSpeaking = state == PipelineState.SPEAKING
 
                         when (state) {
+                            PipelineState.LISTENING -> {
+                                wakeFeedbackKeyword.text = "请说话..."
+                                wakeFeedback.visibility = View.VISIBLE
+                            }
                             PipelineState.PROCESSING -> {
                                 wakeFeedbackKeyword.text = "思考中..."
                                 wakeFeedback.visibility = View.VISIBLE
