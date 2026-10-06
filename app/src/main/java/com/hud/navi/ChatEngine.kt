@@ -487,11 +487,10 @@ class ChatEngine(
      * 支持 Function Calling：模型可自动调用 web_search 联网搜索
      */
     private fun handleChat(result: IntentResult, callback: ((String) -> Unit)?) {
-        // 如果模型已经生成了回复文本（分类阶段直接给出），直接播报
-        // 防回读：如果 text 等于用户原话（userInput/rawText），说明是降级回退的残留，跳过直接走 AI
+        // 如果分类器已经生成了回复文本（如"你好"→"你好，我是哈德"），直接播报
+        // fallback 路径不再预填用户原话，所以这里拿到的 text 一定是模型/规则生成的真正回复
         val text = result.params["text"] as? String
-        val isEcho = text != null && (text == result.userInput || text == result.rawText)
-        if (!text.isNullOrBlank() && !isEcho) {
+        if (!text.isNullOrBlank()) {
             speak(truncateForTts(text))
             callback?.invoke(text)  // UI 显示完整文本
             return

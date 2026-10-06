@@ -35,6 +35,11 @@ class OnnxWakeWordEngine(
         private const val WAKE_THRESHOLD = 0.2f  // v4: lowered from 0.5 to handle diverse voice patterns
         private const val COOLDOWN_MS = 1500L
 
+        // VAD 预过滤参数
+        private const val VAD_NOISE_FLOOR_ALPHA = 0.02f   // 噪声底滑动平均系数（越小越稳定）
+        private const val VAD_SPEECH_RATIO = 3.0f          // 能量 > 噪声底 × 此倍数 → 判定为语音
+        private const val VAD_MIN_ENERGY = 0.005f          // 绝对最低能量阈值（防止完全静音时误触发）
+
         private const val ASSET_DIR = "wakeword"
         private const val MELSPECTROGRAM_MODEL = "melspectrogram.onnx"
         private const val EMBEDDING_MODEL = "embedding_model.onnx"
@@ -195,6 +200,11 @@ class OnnxWakeWordEngine(
         val melBuffer = mutableListOf<FloatArray>()  // List of [?, 32] mel frames
         val embeddingBuffer = mutableListOf<FloatArray>()  // List of [96] embeddings
 
+        // VAD 预过滤状态
+        var noiseFloor = 0.01f  // 初始噪声底估计
+        var speechActive = false
+        var preSpeechBuffer = ArrayDeque<FloatArray>(4)  // 缓存最近 4 个 chunk（320ms），语音开始时补入
+
         try {
             while (running.get()) {
                 val readCount = audioRecord?.read(buffer, 0, CHUNK_SAMPLES) ?: 0
@@ -206,58 +216,105 @@ class OnnxWakeWordEngine(
                     floatBuf[i] = buffer[i].toFloat() / 32768.0f
                 }
 
-                // Step 1: Compute mel spectrogram for this chunk
-                val melFrames = computeMelSpectrogram(floatBuf) ?: continue
-                melBuffer.add(melFrames)
+                // --- VAD 预过滤：计算 RMS 能量 ---
+                var sumSq = 0.0f
+                for (i in 0 until readCount) {
+                    sumSq += floatBuf[i] * floatBuf[i]
+                }
+                val rms = kotlin.math.sqrt(sumSq / readCount)
 
-                // Keep mel buffer bounded (~5 seconds worth)
-                while (melBuffer.size > 250) {
-                    melBuffer.removeAt(0)
+                // 更新噪声底（仅在非语音状态时更新，避免语音污染噪声估计）
+                if (!speechActive) {
+                    noiseFloor = noiseFloor * (1 - VAD_NOISE_FLOOR_ALPHA) + rms * VAD_NOISE_FLOOR_ALPHA
                 }
 
-                // Step 2: When we have enough mel frames, compute embedding
-                val totalMelFrames = melBuffer.sumOf { it.size / 32 }
-                if (totalMelFrames >= MEL_FRAMES_FOR_EMBEDDING) {
-                    // Flatten recent mel frames into [76, 32] window
-                    val flatMel = flattenMelFrames(melBuffer, MEL_FRAMES_FOR_EMBEDDING)
-                    if (flatMel != null) {
-                        val embedding = computeEmbedding(flatMel)
-                        if (embedding != null) {
-                            embeddingBuffer.add(embedding)
+                // 判定是否有语音活动
+                val threshold = maxOf(noiseFloor * VAD_SPEECH_RATIO, VAD_MIN_ENERGY)
+                val isVoice = rms > threshold
 
-                            // Keep embedding buffer bounded
-                            while (embeddingBuffer.size > N_EMBEDDINGS_FOR_CLASSIFIER + 5) {
-                                embeddingBuffer.removeAt(0)
-                            }
-                        }
-
-                        // Remove consumed mel frames (keep some overlap)
-                        val consumeCount = minOf(melBuffer.size - MEL_FRAMES_FOR_EMBEDDING / 4, melBuffer.size / 2)
-                        repeat(consumeCount.coerceAtLeast(0)) {
-                            if (melBuffer.isNotEmpty()) melBuffer.removeAt(0)
-                        }
+                if (isVoice && !speechActive) {
+                    // 语音开始：把缓存的前置音频也送进去（避免截断唤醒词开头）
+                    speechActive = true
+                    Log.d(TAG, "VAD: speech start (rms=$rms, floor=$noiseFloor, threshold=$threshold)")
+                    for (preBuf in preSpeechBuffer) {
+                        processAudioChunk(preBuf, melBuffer, embeddingBuffer)
                     }
+                    preSpeechBuffer.clear()
+                } else if (!isVoice && speechActive) {
+                    // 语音结束
+                    speechActive = false
+                    Log.d(TAG, "VAD: speech end (rms=$rms, floor=$noiseFloor)")
                 }
 
-                // Step 3: When we have 16 embeddings, run classifier
-                if (embeddingBuffer.size >= N_EMBEDDINGS_FOR_CLASSIFIER) {
-                    val features = embeddingBuffer.takeLast(N_EMBEDDINGS_FOR_CLASSIFIER)
-                    val score = classify(features)
-
-                    if (score >= WAKE_THRESHOLD) {
-                        val now = System.currentTimeMillis()
-                        if (now - lastWakeTime >= COOLDOWN_MS) {
-                            lastWakeTime = now
-                            Log.i(TAG, "[WAKE] score=$score")
-                            onWake()
-                        }
+                if (speechActive) {
+                    // 有语音活动 → 送入 ONNX 管线
+                    processAudioChunk(floatBuf, melBuffer, embeddingBuffer)
+                } else {
+                    // 无语音 → 只缓存到前置缓冲区（用于下次语音开始时补入）
+                    if (preSpeechBuffer.size >= 4) {
+                        preSpeechBuffer.removeFirst()
                     }
+                    preSpeechBuffer.addLast(floatBuf)
                 }
             }
         } catch (e: InterruptedException) {
             Log.i(TAG, "Listen loop interrupted")
         } catch (e: Exception) {
             Log.e(TAG, "Listen error: ${e.message}", e)
+        }
+    }
+
+    /**
+     * 处理单个音频 chunk：mel → embedding → classifier
+     * 从 listenLoop 中提取出来，只在 VAD 检测到语音时调用
+     */
+    private fun processAudioChunk(
+        floatBuf: FloatArray,
+        melBuffer: MutableList<FloatArray>,
+        embeddingBuffer: MutableList<FloatArray>
+    ) {
+        // Step 1: Compute mel spectrogram for this chunk
+        val melFrames = computeMelSpectrogram(floatBuf) ?: return
+        melBuffer.add(melFrames)
+
+        // Keep mel buffer bounded (~5 seconds worth)
+        while (melBuffer.size > 250) {
+            melBuffer.removeAt(0)
+        }
+
+        // Step 2: When we have enough mel frames, compute embedding
+        val totalMelFrames = melBuffer.sumOf { it.size / 32 }
+        if (totalMelFrames >= MEL_FRAMES_FOR_EMBEDDING) {
+            val flatMel = flattenMelFrames(melBuffer, MEL_FRAMES_FOR_EMBEDDING)
+            if (flatMel != null) {
+                val embedding = computeEmbedding(flatMel)
+                if (embedding != null) {
+                    embeddingBuffer.add(embedding)
+                    while (embeddingBuffer.size > N_EMBEDDINGS_FOR_CLASSIFIER + 5) {
+                        embeddingBuffer.removeAt(0)
+                    }
+                }
+
+                val consumeCount = minOf(melBuffer.size - MEL_FRAMES_FOR_EMBEDDING / 4, melBuffer.size / 2)
+                repeat(consumeCount.coerceAtLeast(0)) {
+                    if (melBuffer.isNotEmpty()) melBuffer.removeAt(0)
+                }
+            }
+        }
+
+        // Step 3: When we have 16 embeddings, run classifier
+        if (embeddingBuffer.size >= N_EMBEDDINGS_FOR_CLASSIFIER) {
+            val features = embeddingBuffer.takeLast(N_EMBEDDINGS_FOR_CLASSIFIER)
+            val score = classify(features)
+
+            if (score >= WAKE_THRESHOLD) {
+                val now = System.currentTimeMillis()
+                if (now - lastWakeTime >= COOLDOWN_MS) {
+                    lastWakeTime = now
+                    Log.i(TAG, "[WAKE] score=$score")
+                    onWake()
+                }
+            }
         }
     }
 

@@ -394,7 +394,8 @@ class IntentClassifier(
     // ==================== 智谱 API 调用 ====================
 
     private fun classifyWithApi(userText: String): IntentResult? {
-        val prompt = "$SYSTEM_PROMPT\n用户：$userText\n输出："
+        // 系统提示词只放在 system message 里，user message 只放用户输入
+        // 之前的做法是把 SYSTEM_PROMPT 重复塞进 user content，导致 token 浪费 + JSON 输出截断
         val messages = JSONArray().apply {
             put(JSONObject().apply {
                 put("role", "system")
@@ -402,7 +403,7 @@ class IntentClassifier(
             })
             put(JSONObject().apply {
                 put("role", "user")
-                put("content", prompt)
+                put("content", userText)
             })
         }
         // callApiRaw 返回的就是 message 对象（choices[0].message）
