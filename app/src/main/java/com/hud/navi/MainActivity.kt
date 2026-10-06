@@ -1310,7 +1310,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
         val drawLat = if (hudView.isSnapped) hudView.snappedLat else vehicleLat
         val drawLng = if (hudView.isSnapped) hudView.snappedLng else vehicleLng
-        val dynamicZoom = hudView.getDynamicZoom(vehicleSpeed)
+        val dynamicZoom = hudView.getDynamicZoom(hudView.vehicleSpeed)
 
         val cameraUpdate = CameraUpdateFactory.newCameraPosition(
             CameraPosition.Builder()
