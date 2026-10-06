@@ -279,10 +279,16 @@ class IntentClassifier(
 
         // 模型调用了工具 → 执行工具 → 第二轮
         // 先把 assistant 的 tool_calls 消息加入历史
-        // 注意：content 可能为 null（当 finish_reason 为 tool_calls 时）
+        // content 可能为 null（当 finish_reason 为 tool_calls 时）
+        // 智谱 API 要求：content 为 null 时传 null，不能传空字符串
+        val assistantContent = firstMessage.optString("content", "")
         messages.put(JSONObject().apply {
             put("role", "assistant")
-            put("content", firstMessage.optString("content", ""))
+            if (assistantContent.isBlank()) {
+                put("content", JSONObject.NULL)
+            } else {
+                put("content", assistantContent)
+            }
             put("tool_calls", toolCalls)
         })
 
@@ -438,23 +444,22 @@ class IntentClassifier(
         val body = JSONObject().apply {
             put("model", model)
             put("messages", messages)
-            put("max_tokens", if (jsonMode) 256 else 512)
+            // thinking 开启后 reasoning_content 也消耗 max_tokens
+            // GLM-4.7 最大支持 65536，之前 256/512 太小导致输出被截断
+            put("max_tokens", if (jsonMode) 2048 else 4096)
             put("stream", false)
 
             // 智谱 GLM 系列模型需要 thinking 参数
-            // GLM-5.3 强制要求 thinking.type="enabled"
-            // GLM-4.7 默认强制思考，但显式传更稳妥
-            // jsonMode（意图分类）用 low 减少延迟，聊天用 max
             val isGlm5 = model.contains("5") || model.contains("glm-5")
             if (isGlm5 || model.contains("glm-4.7") || model.contains("4.7")) {
                 put("thinking", JSONObject().apply {
                     put("type", "enabled")
                 })
-                put("reasoning_effort", if (jsonMode) "low" else "max")
+                // jsonMode 用 low（意图分类不需要深度推理）
+                // 聊天用 low（日常对话不需要 max，max 会吃掉大量 token 在思考上）
+                put("reasoning_effort", "low")
             }
 
-            // temperature: 智谱 GLM-5.x 默认 1.0，jsonMode 用低温度稳定输出
-            // 注意：GLM-5.x 开了 thinking 后 temperature 对思考过程无效，只影响最终输出
             put("temperature", if (jsonMode) 0.1 else 0.7)
 
             if (tools != null && tools.length() > 0) {
@@ -512,11 +517,23 @@ class IntentClassifier(
         val toolCalls = message.optJSONArray("tool_calls")
         val usage = json.optJSONObject("usage")
 
-        Log.d(TAG, "API response: finish=$finishReason, " +
-                "tool_calls=${toolCalls?.length() ?: 0}, " +
-                "content=${content.take(80)}" +
-                if (reasoningContent.isNotBlank()) ", reasoning=${reasoningContent.take(50)}..." else "" +
-                if (usage != null) ", tokens=${usage.optInt("total_tokens", 0)}" else "")
+        val logBuilder = StringBuilder("API response: finish=$finishReason, ")
+        logBuilder.append("tool_calls=${toolCalls?.length() ?: 0}, ")
+        logBuilder.append("content_len=${content.length}, ")
+        logBuilder.append("content=${content.take(100)}")
+        if (reasoningContent.isNotBlank()) {
+            logBuilder.append(", reasoning_len=${reasoningContent.length}")
+        }
+        if (usage != null) {
+            logBuilder.append(", tokens=${usage.optInt("total_tokens", 0)}")
+        }
+        Log.d(TAG, logBuilder.toString())
+
+        // 调试日志：content 为空时记录完整响应帮助排查
+        if (content.isBlank() && toolCalls == null) {
+            Log.w(TAG, "⚠️ content AND tool_calls both empty! finish=$finishReason")
+            Log.w(TAG, "Raw response: ${responseBody.take(500)}")
+        }
 
         return message
     }
