@@ -488,8 +488,10 @@ class ChatEngine(
      */
     private fun handleChat(result: IntentResult, callback: ((String) -> Unit)?) {
         // 如果模型已经生成了回复文本（分类阶段直接给出），直接播报
+        // 防回读：如果 text 等于用户原话（userInput/rawText），说明是降级回退的残留，跳过直接走 AI
         val text = result.params["text"] as? String
-        if (!text.isNullOrBlank()) {
+        val isEcho = text != null && (text == result.userInput || text == result.rawText)
+        if (!text.isNullOrBlank() && !isEcho) {
             speak(truncateForTts(text))
             callback?.invoke(text)  // UI 显示完整文本
             return

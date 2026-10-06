@@ -42,7 +42,7 @@ data class IntentResult(
         fun fallback(text: String) = IntentResult(
             intent = INTENT_CHAT,
             action = "reply",
-            params = mapOf("text" to text),
+            params = emptyMap(),  // 不预填文本，让 handleChat 走 AI 聊天生成真正的回复
             rawText = "fallback"
         )
     }
