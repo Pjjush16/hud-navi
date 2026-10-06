@@ -482,77 +482,68 @@ class IntentClassifier(
         var finishReason = ""
         var chunkCount = 0
 
-        for (rawLine in rawSse.split("\n")) {
-            val line = rawLine.trim()
-            if (!line.startsWith("data: ")) {
-                // 跳过空行、注释行、event: 行等
-                val _ = 0
-            } else {
-                val data = line.substring(6).trim()
-                if (data == "[DONE]") {
-                    // 流结束，不需要 break，后续行都是空的
-                    val _ = 0
-                } else {
-                    try {
-                        val chunk = JSONObject(data)
+        val sseLines = rawSse.split("\n")
+        var lineIndex = 0
+        while (lineIndex < sseLines.size) {
+            val line = sseLines[lineIndex].trim()
+            lineIndex++
 
-                        // usage
-                        val chunkUsage = chunk.optJSONObject("usage")
-                        if (chunkUsage != null) {
-                            // 记录但不直接使用（最终 message 不需要 usage）
-                        }
+            // 只处理 data: 行
+            if (!line.startsWith("data: ")) continue
 
-                        val choices = chunk.optJSONArray("choices")
-                        if (choices != null && choices.length() > 0) {
-                            val choice = choices.getJSONObject(0)
+            val data = line.substring(6).trim()
+            if (data == "[DONE]") break
 
-                            // finish_reason
-                            val fr = choice.optString("finish_reason", "")
-                            if (fr.isNotBlank()) finishReason = fr
+            try {
+                val chunk = JSONObject(data)
 
-                            val delta = choice.optJSONObject("delta")
-                            if (delta != null) {
-                                // 累积 content
-                                val deltaContent = delta.optString("content", "")
-                                if (deltaContent.isNotEmpty()) {
-                                    contentBuilder.append(deltaContent)
+                val choices = chunk.optJSONArray("choices")
+                if (choices == null || choices.length() == 0) continue
+
+                val choice = choices.getJSONObject(0)
+
+                val fr = choice.optString("finish_reason", "")
+                if (fr.isNotBlank()) finishReason = fr
+
+                val delta = choice.optJSONObject("delta") ?: continue
+
+                // 累积 content
+                val deltaContent = delta.optString("content", "")
+                if (deltaContent.isNotEmpty()) {
+                    contentBuilder.append(deltaContent)
+                }
+
+                // 累积 tool_calls
+                val deltaToolCalls = delta.optJSONArray("tool_calls")
+                if (deltaToolCalls != null) {
+                    for (i in 0 until deltaToolCalls.length()) {
+                        val tc = deltaToolCalls.getJSONObject(i)
+                        val index = tc.optInt("index", i)
+                        val existing = toolCallsMap[index]
+
+                        if (existing == null) {
+                            toolCallsMap[index] = JSONObject(tc.toString())
+                        } else {
+                            val func = tc.optJSONObject("function")
+                            if (func != null) {
+                                val existFunc = existing.optJSONObject("function")
+                                if (existFunc != null) {
+                                    val existArgs = existFunc.optString("arguments", "")
+                                    val newArgs = func.optString("arguments", "")
+                                    existFunc.put("arguments", existArgs + newArgs)
                                 }
-
-                                // 累积 tool_calls
-                                val deltaToolCalls = delta.optJSONArray("tool_calls")
-                                if (deltaToolCalls != null) {
-                                    for (i in 0 until deltaToolCalls.length()) {
-                                        val tc = deltaToolCalls.getJSONObject(i)
-                                        val index = tc.optInt("index", i)
-                                        val existing = toolCallsMap[index]
-
-                                        if (existing == null) {
-                                            toolCallsMap[index] = JSONObject(tc.toString())
-                                        } else {
-                                            val func = tc.optJSONObject("function")
-                                            if (func != null) {
-                                                val existFunc = existing.optJSONObject("function")
-                                                if (existFunc != null) {
-                                                    val existArgs = existFunc.optString("arguments", "")
-                                                    val newArgs = func.optString("arguments", "")
-                                                    existFunc.put("arguments", existArgs + newArgs)
-                                                }
-                                                val tcId = tc.optString("id", "")
-                                                if (tcId.isNotEmpty() && existing.optString("id", "").isEmpty()) {
-                                                    existing.put("id", tcId)
-                                                }
-                                            }
-                                        }
-                                    }
+                                val tcId = tc.optString("id", "")
+                                if (tcId.isNotEmpty() && existing.optString("id", "").isEmpty()) {
+                                    existing.put("id", tcId)
                                 }
                             }
-
-                            chunkCount++
                         }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "SSE chunk parse error: ${e.message}, data=${data.take(100)}")
                     }
                 }
+
+                chunkCount++
+            } catch (e: Exception) {
+                Log.w(TAG, "SSE chunk parse error: ${e.message}")
             }
         }
 
