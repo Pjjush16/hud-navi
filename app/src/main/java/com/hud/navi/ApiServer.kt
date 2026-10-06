@@ -289,4 +289,12 @@ class ApiServer(
             json.toString(2)
         )
     }
+
+    private fun jsonResponse(statusCode: Int, json: JSONObject): Response {
+        return newFixedLengthResponse(
+            Response.Status.lookup(statusCode) ?: Response.Status.INTERNAL_ERROR,
+            "application/json",
+            json.toString(2)
+        )
+    }
 }
