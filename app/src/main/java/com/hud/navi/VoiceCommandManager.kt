@@ -1,15 +1,11 @@
 /*
- * VoiceCommandManager.kt - 唤醒后语音指令管理器 (v11.0)
+ * VoiceCommandManager.kt - 唤醒后语音指令管理器 (v13.12 离线流式ASR)
  *
  * 唤醒词检测成功后，接管录音流程：
- *   1. 播放"我在"提示音
- *   2. 开始录音（用户说话）
- *   3. 检测语音结束（静音超时 / 最大时长）
- *   4. 调用 ASR 转文字
- *   5. 将文本交给 IntentClassifier 分类
- *
- * 当前 ASR 使用 Android 内置 SpeechRecognizer（免模型文件）。
- * 后续可切换为 sherpa-onnx Whisper 离线识别（完全离线，无需网络）。
+ *   1. 使用 sherpa-onnx 离线流式 ASR（优先）或 Android SpeechRecognizer（降级）
+ *   2. 流式输出：边说边出字（Siri 风格）
+ *   3. 内置端点检测：自动判断语音结束
+ *   4. 将文本交给 IntentClassifier 分类
  */
 
 package com.hud.navi
@@ -18,9 +14,6 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.media.AudioFormat
-import android.media.AudioRecord
-import android.media.MediaRecorder
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -38,26 +31,44 @@ class VoiceCommandManager(
 ) {
     companion object {
         private const val TAG = "VoiceCommand"
-        private const val SAMPLE_RATE = 16000
-        private const val MAX_LISTEN_MS = 8000L     // 最大录音 8 秒
-        private const val SILENCE_TIMEOUT_MS = 2000L // 静音 2 秒视为结束
-        private const val MIN_SPEECH_MS = 300L       // 最短有效语音 300ms
-        private const val NO_SPEECH_DISMISS_MS = 2000L  // v13.11: 唤醒后 2 秒内无语音自动收起
+        private const val MAX_LISTEN_MS = 15000L     // v13.12: 最大录音 15 秒（流式 ASR 有端点检测，但设安全上限）
     }
 
+    // 离线流式 ASR（优先）
+    private var streamingAsr: StreamingAsrManager? = null
+    // Android SpeechRecognizer（降级备用）
     private var recognizer: SpeechRecognizer? = null
+
     private val recording = AtomicBoolean(false)
     private val handler = Handler(Looper.getMainLooper())
-    private var silenceTimer: Runnable? = null
     private var maxTimer: Runnable? = null
-    private var noSpeechDismissTimer: Runnable? = null  // v13.11: 无语音自动收起
-    private var speechStartTime = 0L
-    private var hasSpeech = false
+    private var useOfflineAsr = false
 
-    /**
-     * 初始化语音识别器
-     */
+    var asrMode: String = "unknown"
+        private set
+
     fun init(): Boolean {
+        // 优先初始化离线流式 ASR
+        try {
+            streamingAsr = StreamingAsrManager(context) { text, isFinal ->
+                // 确保在主线程回调
+                handler.post { onResult(text, isFinal) }
+            }
+            if (streamingAsr!!.init()) {
+                useOfflineAsr = true
+                asrMode = "offline-streaming"
+                Log.i(TAG, "Offline streaming ASR initialized")
+                return true
+            } else {
+                Log.w(TAG, "Offline ASR init failed: ${streamingAsr!!.initError}, falling back to SpeechRecognizer")
+                streamingAsr = null
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Offline ASR exception: ${e.message}, falling back")
+            streamingAsr = null
+        }
+
+        // 降级：Android SpeechRecognizer
         if (!SpeechRecognizer.isRecognitionAvailable(context)) {
             Log.w(TAG, "Speech recognition not available on this device")
             return false
@@ -66,7 +77,9 @@ class VoiceCommandManager(
         try {
             recognizer = SpeechRecognizer.createSpeechRecognizer(context)
             recognizer?.setRecognitionListener(createRecognitionListener())
-            Log.i(TAG, "VoiceCommandManager initialized")
+            useOfflineAsr = false
+            asrMode = "android-cloud"
+            Log.i(TAG, "VoiceCommandManager initialized (SpeechRecognizer fallback)")
             return true
         } catch (e: Exception) {
             Log.e(TAG, "Init failed: ${e.message}", e)
@@ -74,10 +87,6 @@ class VoiceCommandManager(
         }
     }
 
-    /**
-     * 开始录音（唤醒词触发后调用）
-     * 每次调用都重建 SpeechRecognizer，确保音频管线干净
-     */
     fun startListening() {
         if (recording.get()) {
             Log.w(TAG, "Already recording")
@@ -92,10 +101,72 @@ class VoiceCommandManager(
         }
 
         recording.set(true)
-        hasSpeech = false
-        speechStartTime = System.currentTimeMillis()
 
-        // 重建 recognizer — 避免复用导致内部音频状态残留
+        if (useOfflineAsr) {
+            startOfflineAsr()
+        } else {
+            startSpeechRecognizer()
+        }
+    }
+
+    fun stopListening() {
+        if (!recording.get()) return
+        recording.set(false)
+
+        maxTimer?.let { handler.removeCallbacks(it) }
+        maxTimer = null
+
+        if (useOfflineAsr) {
+            streamingAsr?.stopListening()
+        } else {
+            try { recognizer?.stopListening() } catch (_: Exception) {}
+        }
+    }
+
+    fun cancelListening() {
+        if (!recording.get()) return
+        recording.set(false)
+
+        maxTimer?.let { handler.removeCallbacks(it) }
+        maxTimer = null
+
+        if (useOfflineAsr) {
+            streamingAsr?.stopListening()
+        } else {
+            try { recognizer?.cancel() } catch (_: Exception) {}
+        }
+    }
+
+    fun isRecording(): Boolean = recording.get()
+
+    fun release() {
+        cancelListening()
+        streamingAsr?.release()
+        streamingAsr = null
+        recognizer?.destroy()
+        recognizer = null
+    }
+
+    // ==================== 离线流式 ASR ====================
+
+    private fun startOfflineAsr() {
+        Log.i(TAG, "Starting offline streaming ASR...")
+
+        // 设置安全超时
+        maxTimer = Runnable {
+            if (recording.get()) {
+                Log.i(TAG, "Max recording time reached")
+                stopListening()
+            }
+        }
+        handler.postDelayed(maxTimer!!, MAX_LISTEN_MS)
+
+        streamingAsr?.startListening()
+    }
+
+    // ==================== Android SpeechRecognizer（降级） ====================
+
+    private fun startSpeechRecognizer() {
         try {
             recognizer?.cancel()
             recognizer?.destroy()
@@ -117,29 +188,15 @@ class VoiceCommandManager(
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.CHINESE.toString())
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, MIN_SPEECH_MS.toInt())
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, SILENCE_TIMEOUT_MS.toInt())
         }
 
         try {
             recognizer?.startListening(intent)
-            Log.i(TAG, "Started listening (fresh recognizer)...")
+            Log.i(TAG, "Started SpeechRecognizer (fallback)...")
 
-            // v13.11: 2 秒内无语音自动收起（不等满 8 秒）
-            noSpeechDismissTimer = Runnable {
-                if (recording.get() && !hasSpeech) {
-                    Log.i(TAG, "No speech detected in ${NO_SPEECH_DISMISS_MS}ms, auto-dismiss")
-                    recording.set(false)
-                    try { recognizer?.cancel() } catch (_: Exception) {}
-                    onResult("", true)
-                }
-            }
-            handler.postDelayed(noSpeechDismissTimer!!, NO_SPEECH_DISMISS_MS)
-
-            // 设置最大录音时间
             maxTimer = Runnable {
                 if (recording.get()) {
-                    Log.i(TAG, "Max recording time reached, stopping")
+                    Log.i(TAG, "Max recording time reached (SpeechRecognizer)")
                     stopListening()
                 }
             }
@@ -151,98 +208,20 @@ class VoiceCommandManager(
         }
     }
 
-    /**
-     * 停止录音
-     */
-    fun stopListening() {
-        if (!recording.get()) return
-        recording.set(false)
-
-        // 清理计时器
-        silenceTimer?.let { handler.removeCallbacks(it) }
-        maxTimer?.let { handler.removeCallbacks(it) }
-        noSpeechDismissTimer?.let { handler.removeCallbacks(it) }
-        silenceTimer = null
-        maxTimer = null
-        noSpeechDismissTimer = null
-
-        try {
-            recognizer?.stopListening()
-        } catch (e: Exception) {
-            Log.w(TAG, "stopListening error: ${e.message}")
-        }
-    }
-
-    /**
-     * 取消录音
-     */
-    fun cancelListening() {
-        if (!recording.get()) return
-        recording.set(false)
-
-        silenceTimer?.let { handler.removeCallbacks(it) }
-        maxTimer?.let { handler.removeCallbacks(it) }
-        noSpeechDismissTimer?.let { handler.removeCallbacks(it) }
-
-        try {
-            recognizer?.cancel()
-        } catch (e: Exception) {
-            Log.w(TAG, "cancel error: ${e.message}")
-        }
-    }
-
-    fun isRecording(): Boolean = recording.get()
-
-    fun release() {
-        cancelListening()
-        recognizer?.destroy()
-        recognizer = null
-    }
-
-    // ==================== 识别监听器 ====================
-
     private fun createRecognitionListener() = object : RecognitionListener {
-
-        override fun onReadyForSpeech(params: Bundle?) {
-            Log.d(TAG, "Ready for speech")
-        }
-
-        override fun onBeginningOfSpeech() {
-            Log.d(TAG, "Speech started")
-            hasSpeech = true
-            speechStartTime = System.currentTimeMillis()
-            // v13.11: 检测到语音后取消无语音自动收起计时器
-            noSpeechDismissTimer?.let { handler.removeCallbacks(it) }
-            noSpeechDismissTimer = null
-        }
-
-        override fun onRmsChanged(rmsdB: Float) {
-            // 可选：用于 UI 显示音量条
-        }
-
+        override fun onReadyForSpeech(params: Bundle?) {}
+        override fun onBeginningOfSpeech() {}
+        override fun onRmsChanged(rmsdB: Float) {}
         override fun onBufferReceived(buffer: ByteArray?) {}
-
-        override fun onEndOfSpeech() {
-            Log.d(TAG, "Speech ended")
-            // 如果语音持续时间太短，忽略
-            val duration = System.currentTimeMillis() - speechStartTime
-            if (duration < MIN_SPEECH_MS) {
-                Log.w(TAG, "Speech too short: ${duration}ms")
-                recording.set(false)
-                onResult("", true)
-            }
-        }
+        override fun onEndOfSpeech() {}
 
         override fun onResults(results: Bundle?) {
             recording.set(false)
             val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
             val text = matches?.firstOrNull() ?: ""
-
             if (text.isNotBlank()) {
-                Log.i(TAG, "Final result: $text")
                 onResult(text, true)
             } else {
-                Log.w(TAG, "Empty result")
                 onResult("", true)
             }
         }
@@ -250,20 +229,8 @@ class VoiceCommandManager(
         override fun onPartialResults(partialResults: Bundle?) {
             val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
             val text = matches?.firstOrNull() ?: ""
-
             if (text.isNotBlank()) {
-                Log.d(TAG, "Partial: $text")
                 onResult(text, false)
-
-                // 重置静音计时器
-                silenceTimer?.let { handler.removeCallbacks(it) }
-                silenceTimer = Runnable {
-                    if (recording.get()) {
-                        Log.i(TAG, "Silence timeout, stopping")
-                        stopListening()
-                    }
-                }
-                handler.postDelayed(silenceTimer!!, SILENCE_TIMEOUT_MS)
             }
         }
 
@@ -281,13 +248,11 @@ class VoiceCommandManager(
                 SpeechRecognizer.ERROR_SERVER -> "服务器错误"
                 else -> "未知错误 ($error)"
             }
-            Log.w(TAG, "Recognition error: $errorMsg (code=$error)")
-            // v13.11: 将错误信息作为文本返回，让用户看到发生了什么
-            // 而不是静默返回空字符串（之前用户说了半天话什么都不知道）
+            Log.w(TAG, "SpeechRecognizer error: $errorMsg (code=$error)")
             if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
-                onResult("", true)  // 无匹配/超时 → 空文本触发"没听清"
+                onResult("", true)
             } else {
-                onResult("语音识别: $errorMsg", true)  // 其他错误 → 显示错误信息
+                onResult("语音识别: $errorMsg", true)
             }
         }
 
