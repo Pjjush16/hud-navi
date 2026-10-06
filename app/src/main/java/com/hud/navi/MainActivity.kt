@@ -55,6 +55,19 @@ import kotlinx.coroutines.launch
 import kotlin.math.*
 import java.io.File
 
+// MapLibre GL Native: 矢量瓦片 + OpenGL ES 渲染
+import org.maplibre.android.MapLibre
+import org.maplibre.android.camera.CameraPosition
+import org.maplibre.android.camera.CameraUpdateFactory
+import org.maplibre.android.geometry.LatLng
+import org.maplibre.android.maps.MapView
+import org.maplibre.android.maps.Style
+import org.maplibre.android.style.layers.LineLayer
+import org.maplibre.android.style.layers.Property
+import org.maplibre.android.style.sources.GeoJsonSource
+import com.google.gson.JsonArray
+import com.google.gson.JsonObject
+
 /**
  * HUD 导航 v9.0 — 回滚地图绘制到气压计之前
  *
@@ -67,6 +80,8 @@ import java.io.File
 class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener {
 
     private lateinit var hudView: HudView
+    private lateinit var mapView: MapView
+    private var maplibreStyleLoaded = false
     private lateinit var locationManager: LocationManager
     private lateinit var sensorManager: SensorManager
     private val handler = Handler(Looper.getMainLooper())
@@ -340,12 +355,77 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+        // MapLibre 初始化（必须在 setContentView 之前）
+        MapLibre.getInstance(this)
+
         setContentView(R.layout.activity_main)
 
         flipContainer = findViewById(R.id.flipContainer)
         permDeniedLayout = findViewById(R.id.permDeniedLayout)
         btnRetryPerm = findViewById(R.id.btnRetryPerm)
         hudView = findViewById(R.id.hudView)
+
+        // MapLibre MapView 初始化
+        mapView = findViewById(R.id.mapView)
+        mapView.onCreate(savedInstanceState)
+        mapView.getMapAsync { map ->
+            // 加载 HUD 暗色样式（assets 中的 JSON）
+            map.setStyle(Style.Builder().fromUri("asset://hud_dark_style.json")) { style ->
+                maplibreStyleLoaded = true
+
+                // 初始相机位置：模拟驾驶员视角
+                // Pitch -15° → MapLibre tilt = 75° (从正上方 0° 算起)
+                // Z 轴 3m 眼高 → zoom ≈ 19.5（基准值，动态缩放由此加减）
+                // FOV 50° 通过 zoom 间接模拟
+                map.cameraPosition = CameraPosition.Builder()
+                    .tilt(HUD_TILT)
+                    .zoom(19.5)
+                    .build()
+
+                // 禁用 MapLibre 内置 logo 和归因（我们用自定义的）
+                map.uiSettings.isLogoEnabled = false
+                map.uiSettings.isAttributionEnabled = false
+                map.uiSettings.isCompassEnabled = false
+
+                // 禁用用户手势（HUD 模式下不需要手动操作地图）
+                map.uiSettings.isScrollGesturesEnabled = false
+                map.uiSettings.isZoomGesturesEnabled = false
+                map.uiSettings.isRotateGesturesEnabled = false
+                map.uiSettings.isTiltGesturesEnabled = false
+
+                // 添加导航路线 GeoJSON Source（空初始）
+                style.addSource(GeoJsonSource("navigation-route", JsonObject().apply {
+                    addProperty("type", "FeatureCollection")
+                    add("features", JsonArray())
+                }))
+
+                // 导航路线图层：深蓝轮廓 + 亮蓝路线
+                style.addLayer(LineLayer("route-outline", "navigation-route").apply {
+                    setProperties(
+                        Property.LINE_CAP, Property.LINE_CAP_ROUND,
+                        Property.LINE_JOIN, Property.LINE_JOIN_ROUND
+                    )
+                    lineWidth = 8f
+                    lineColor = "#003366"
+                })
+                style.addLayerAbove(LineLayer("route-line", "navigation-route").apply {
+                    setProperties(
+                        Property.LINE_CAP, Property.LINE_CAP_ROUND,
+                        Property.LINE_JOIN, Property.LINE_JOIN_ROUND
+                    )
+                    lineWidth = 4f
+                    lineColor = "#00BFFF"
+                }, "route-outline")
+
+                Log.i(TAG, "MapLibre style loaded (HUD dark, tilt=75° pitch=-15°, z=3m, FOV≈50°)")
+            }
+        }
+
+        // 路线变更回调：更新 MapLibre GeoJSON
+        hudView.onRouteChanged = { route ->
+            updateMapLibreRoute(route)
+        }
 
         // 唤醒反馈 UI
         wakeFeedback = findViewById(R.id.wakeFeedback)
@@ -896,6 +976,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         // v15.0: 路口场景用 EKF 的绘制速度（GPS 平滑速度）
         hudView.vehicleSpeed = ((if (nearIntersection) ekf.drawSpeed else ekf.speed) * 3.6).toFloat()
 
+        // v14.0: MapLibre 相机跟随（45° 倾斜 + 车头方向 + 动态缩放）
+        updateMapLibreCamera()
+
         hudView.invalidate()
     }
 
@@ -1092,9 +1175,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
     override fun onResume() {
         super.onResume()
+        mapView.onResume()
         startRenderLoop()
         startHudForegroundService()
-        // v11.0: 使用 VoicePipeline 管理唤醒词监听
         if (wakeWordEnabled) {
             voicePipeline?.start()
         }
@@ -1103,19 +1186,41 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     override fun onPause() {
         stopRenderLoop()
         voicePipeline?.pause()
+        mapView.onPause()
         super.onPause()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        mapView.onStart()
+    }
+
+    override fun onStop() {
+        mapView.onStop()
+        super.onStop()
     }
 
     override fun onDestroy() {
         stopRenderLoop()
         voicePipeline?.release()
-        apiServer?.stopServer()  // v13.14: 停止 API 服务器
+        apiServer?.stopServer()
+        mapView.onDestroy()
         locationManager.removeUpdates(this)
         sensorManager.unregisterListener(this)
         handler.removeCallbacksAndMessages(null)
         roadFetchJob?.cancel(); scope.cancel()
         stopService(Intent(this, HudForegroundService::class.java))
         super.onDestroy()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        mapView.onSaveInstanceState(outState)
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        mapView.onLowMemory()
     }
 
     /**
@@ -1194,5 +1299,61 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
     private fun dpToPx(dp: Int): Float {
         return dp * resources.displayMetrics.density
+    }
+
+    // === MapLibre 相机更新（每帧调用） ===
+    // 摄像机参数：Z=3m眼高, Pitch=-15°, FOV=50°
+    private val HUD_TILT = 75.0   // MapLibre tilt: 0=俯视, 90=水平. 75° ≈ pitch -15°
+
+    private fun updateMapLibreCamera() {
+        if (!maplibreStyleLoaded || vehicleLat == 0.0) return
+
+        val drawLat = if (hudView.isSnapped) hudView.snappedLat else vehicleLat
+        val drawLng = if (hudView.isSnapped) hudView.snappedLng else vehicleLng
+        val dynamicZoom = hudView.getDynamicZoom(vehicleSpeed)
+
+        val cameraUpdate = CameraUpdateFactory.newCameraPosition(
+            CameraPosition.Builder()
+                .target(LatLng(drawLat, drawLng))
+                .bearing(vehicleBearing.toDouble())
+                .tilt(HUD_TILT)
+                .zoom(dynamicZoom.toDouble())
+                .build()
+        )
+        // animateCamera 太慢（300ms），用 easeCamera 快速跟随
+        mapView.getMapAsync { map ->
+            map.easeCamera(cameraUpdate, 100, false, null)
+        }
+    }
+
+    // === MapLibre 路线更新（GeoJSON） ===
+    private fun updateMapLibreRoute(route: List<Pair<Double, Double>>) {
+        if (!maplibreStyleLoaded || route.isEmpty()) return
+
+        val coordinates = JsonArray()
+        for ((lat, lng) in route) {
+            val coord = JsonArray()
+            coord.add(lng)  // GeoJSON: [lng, lat]
+            coord.add(lat)
+            coordinates.add(coord)
+        }
+
+        val feature = JsonObject()
+        feature.addProperty("type", "Feature")
+        feature.add("properties", JsonObject())
+        val geometry = JsonObject()
+        geometry.addProperty("type", "LineString")
+        geometry.add("coordinates", coordinates)
+        feature.add("geometry", geometry)
+
+        val featureCollection = JsonObject()
+        featureCollection.addProperty("type", "FeatureCollection")
+        val features = JsonArray()
+        features.add(feature)
+        featureCollection.add("features", features)
+
+        mapView.getMapAsync { map ->
+            map.style?.getSourceAs<GeoJsonSource>("navigation-route")?.setGeoJson(featureCollection)
+        }
     }
 }

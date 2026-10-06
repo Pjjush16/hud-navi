@@ -10,7 +10,13 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent">
 
-        <!-- 自研 Canvas 绘制引擎 — 全部 HUD 元素在 Canvas 内绘制 -->
+        <!-- MapLibre 矢量瓦片底图（OpenGL ES, 45° 倾斜） -->
+        <org.maplibre.android.maps.MapView
+            android:id="@+id/mapView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <!-- HUD 覆盖层（透明背景，只画车速/车标/导航信息） -->
         <com.hud.navi.HudView
             android:id="@+id/hudView"
             android:layout_width="match_parent"

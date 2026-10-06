@@ -11,8 +11,8 @@ android {
         applicationId = "com.hud.navi"
         minSdk = 24  // ONNX Runtime 1.18 requires API 24+
         targetSdk = 34
-        versionCode = 72
-        versionName = "13.23"
+        versionCode = 73
+        versionName = "14.0"
     }
 
     // ABI 分包
@@ -67,6 +67,12 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+
+    // MapLibre GL Native: 矢量瓦片 + OpenGL ES 渲染（45° 倾斜 HUD）
+    implementation("org.maplibre.gl:android-sdk:11.5.2")
+
+    // Gson: GeoJSON 构建（MapLibre 传递依赖，显式声明确保可用）
+    implementation("com.google.code.gson:gson:2.10.1")
 
     // sherpa-onnx: 离线关键词识别（中文唤醒词）— 保留作为备用
     implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar", "*.jar"))))
