@@ -774,6 +774,8 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         )
         // v15.0: 路口状态传给 EKF，让 EKF 处理路口位置延迟/停车
         ekf.isNearIntersection = nearIntersection
+        // GPS 确认转向：branchLockFrames 达到阈值说明 GPS 已明确确认用户走向哪个分支
+        ekf.gpsConfirmedTurn = branchLockFrames >= BRANCH_LOCK_MIN_FRAMES
 
         ekf.predict(dt, vehicleBearing, targetSpeed * 1000f / 3600f, linearAccelMag,
             worldAccN = smoothedWorldAcc[0].toDouble(),
@@ -903,11 +905,17 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         }
 
         var inIntersection = false
+        var nearestDist = Double.MAX_VALUE
         for (inter in intersections) {
-            if (RoadFetcher.haversine(vehicleLat, vehicleLng, inter.lat, inter.lng) < INTERSECTION_DETECT_RADIUS) {
-                inIntersection = true; break
+            val d = RoadFetcher.haversine(vehicleLat, vehicleLng, inter.lat, inter.lng)
+            if (d < nearestDist) nearestDist = d
+            if (d < INTERSECTION_DETECT_RADIUS) {
+                inIntersection = true
             }
         }
+
+        // 传给 EKF 距离信息（即使不在路口范围内也传，用于 50m 减速）
+        ekf.distToIntersectionM = if (nearestDist < 100.0) nearestDist else 999.0
 
         if (inIntersection) {
             nearIntersection = true; lastIntersectionTime = System.currentTimeMillis()

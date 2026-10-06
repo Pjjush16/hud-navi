@@ -1,5 +1,5 @@
 /*
- * EkfDeadReckoning.kt - v15.0 回退到 v10.00 简洁架构 + 路口处理
+ * EkfDeadReckoning.kt - v15.1 距离驱动路口减速
  *
  * 基于 v10.00 的 4 维 EKF（lat, lng, vN, vE），去掉 v14.0 的：
  * - 四元数姿态解算（互补滤波太信陀螺 → 姿态漂移）
@@ -7,12 +7,11 @@
  * - ZUPT（路口减速被误判为静止）
  * - 复杂协方差传播（交叉项耦合）
  *
- * 新增（学自用户笔记）：
- * - 多源航向融合（GPS > 陀螺积分 > RV > 罗盘，简单优先级）
- * - 路网约束更新（v10.20 简化版）
- * - 路口位置历史缓冲（3 秒环形缓冲）
- * - 路口车标延迟/停车策略
- * - 路口 GPS 速度切换（积分不可信时切 GPS 平滑速度）
+ * v15.1 路口减速改为距离驱动：
+ * - 距路口 50m 开始减速，每 10m 减 10%
+ * - 距路口 10-2m 降到 3km/h
+ * - 距路口 < 2m 车标停住，等 GPS 确认转向
+ * - GPS 确认（branchLockFrames >= 阈值）后车标加速追上
  *
  * 状态向量 [4]: [lat, lng, vN, vE]
  */
@@ -79,9 +78,11 @@ class EkfDeadReckoning {
 
     // 路口状态
     var isNearIntersection = false
+    var distToIntersectionM = 999.0  // 距路口距离（米），外部设置
+    var gpsConfirmedTurn = false     // GPS 已确认转向方向
     var drawLat = 0.0    // 绘制用位置（可能延迟）
     var drawLng = 0.0
-    var drawSpeed = 0.0  // 绘制用速度（可能切 GPS）
+    var drawSpeed = 0.0  // 绘制用速度（可能减速）
 
     // GPS 速度 EMA（路口用）
     private var gpsSmoothedSpeed = 0.0
@@ -222,32 +223,48 @@ class EkfDeadReckoning {
         vN += speedAlpha * (newVN - vN)
         vE += speedAlpha * (newVE - vE)
 
-        // ── 路口特殊处理 ──
+        // ── 路口特殊处理（距离驱动减速）──
         if (isNearIntersection) {
-            // 路口场景：速度用 GPS 平滑速度（积分不可信）
-            val interSpeed = gpsSmoothedSpeed
-            val interVN = interSpeed * cos(headingRad)
-            val interVE = interSpeed * sin(headingRad)
-
-            // 如果速度很低（<5km/h），车标停下来
-            if (interSpeed < 1.4) {  // 5 km/h ≈ 1.4 m/s
-                drawSpeed = 0.0
-                // 不更新 drawLat/drawLng（车标停住）
-            } else {
-                // 车标用 1.5 秒前的位置（延迟策略）
-                val delayedPos = getDelayedPosition(1500)
-                if (delayedPos != null) {
-                    drawLat = delayedPos.first
-                    drawLng = delayedPos.second
-                } else {
+            val MIN_SPEED_MS = 0.83  // 3 km/h ≈ 0.83 m/s
+            
+            when {
+                // 距路口 > 50m：正常行驶
+                distToIntersectionM >= 50.0 -> {
+                    drawLat = lat; drawLng = lng
+                    drawSpeed = speed
+                }
+                
+                // 距路口 10-50m：线性减速
+                distToIntersectionM >= 10.0 -> {
+                    val decelFactor = distToIntersectionM / 50.0  // 50m时=1.0, 10m时=0.2
+                    drawSpeed = speed * decelFactor
                     drawLat = lat; drawLng = lng
                 }
-                drawSpeed = interSpeed
+                
+                // 距路口 < 10m：降到 3km/h
+                distToIntersectionM >= 2.0 -> {
+                    drawSpeed = MIN_SPEED_MS.coerceAtMost(speed)
+                    drawLat = lat; drawLng = lng
+                }
+                
+                // 已到达路口（< 2m）：等待 GPS 确认转向
+                !gpsConfirmedTurn -> {
+                    drawSpeed = 0.0  // 车标停住
+                    // 不更新 drawLat/drawLng（车标停在路口）
+                }
+                
+                // GPS 已确认转向：车标加速追上
+                else -> {
+                    drawLat = lat; drawLng = lng
+                    drawSpeed = speed  // 恢复正常速度
+                }
             }
         } else {
             // 正常场景：实时位置
             drawLat = lat; drawLng = lng
             drawSpeed = speed
+            // 离开路口后重置确认标志
+            gpsConfirmedTurn = false
         }
 
         // ── 位置积分 ──
