@@ -42,6 +42,7 @@ class VoiceCommandManager(
         private const val MAX_LISTEN_MS = 8000L     // 最大录音 8 秒
         private const val SILENCE_TIMEOUT_MS = 2000L // 静音 2 秒视为结束
         private const val MIN_SPEECH_MS = 300L       // 最短有效语音 300ms
+        private const val NO_SPEECH_DISMISS_MS = 2000L  // v13.11: 唤醒后 2 秒内无语音自动收起
     }
 
     private var recognizer: SpeechRecognizer? = null
@@ -49,6 +50,7 @@ class VoiceCommandManager(
     private val handler = Handler(Looper.getMainLooper())
     private var silenceTimer: Runnable? = null
     private var maxTimer: Runnable? = null
+    private var noSpeechDismissTimer: Runnable? = null  // v13.11: 无语音自动收起
     private var speechStartTime = 0L
     private var hasSpeech = false
 
@@ -123,6 +125,17 @@ class VoiceCommandManager(
             recognizer?.startListening(intent)
             Log.i(TAG, "Started listening (fresh recognizer)...")
 
+            // v13.11: 2 秒内无语音自动收起（不等满 8 秒）
+            noSpeechDismissTimer = Runnable {
+                if (recording.get() && !hasSpeech) {
+                    Log.i(TAG, "No speech detected in ${NO_SPEECH_DISMISS_MS}ms, auto-dismiss")
+                    recording.set(false)
+                    try { recognizer?.cancel() } catch (_: Exception) {}
+                    onResult("", true)
+                }
+            }
+            handler.postDelayed(noSpeechDismissTimer!!, NO_SPEECH_DISMISS_MS)
+
             // 设置最大录音时间
             maxTimer = Runnable {
                 if (recording.get()) {
@@ -148,8 +161,10 @@ class VoiceCommandManager(
         // 清理计时器
         silenceTimer?.let { handler.removeCallbacks(it) }
         maxTimer?.let { handler.removeCallbacks(it) }
+        noSpeechDismissTimer?.let { handler.removeCallbacks(it) }
         silenceTimer = null
         maxTimer = null
+        noSpeechDismissTimer = null
 
         try {
             recognizer?.stopListening()
@@ -167,6 +182,7 @@ class VoiceCommandManager(
 
         silenceTimer?.let { handler.removeCallbacks(it) }
         maxTimer?.let { handler.removeCallbacks(it) }
+        noSpeechDismissTimer?.let { handler.removeCallbacks(it) }
 
         try {
             recognizer?.cancel()
@@ -195,6 +211,9 @@ class VoiceCommandManager(
             Log.d(TAG, "Speech started")
             hasSpeech = true
             speechStartTime = System.currentTimeMillis()
+            // v13.11: 检测到语音后取消无语音自动收起计时器
+            noSpeechDismissTimer?.let { handler.removeCallbacks(it) }
+            noSpeechDismissTimer = null
         }
 
         override fun onRmsChanged(rmsdB: Float) {
@@ -263,9 +282,13 @@ class VoiceCommandManager(
                 else -> "未知错误 ($error)"
             }
             Log.w(TAG, "Recognition error: $errorMsg (code=$error)")
-            // NO_MATCH/SPEECH_TIMEOUT → 空文本触发"没听清"
-            // 其他错误 → 也返回空文本，避免错误信息被当作语音指令处理
-            onResult("", true)
+            // v13.11: 将错误信息作为文本返回，让用户看到发生了什么
+            // 而不是静默返回空字符串（之前用户说了半天话什么都不知道）
+            if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
+                onResult("", true)  // 无匹配/超时 → 空文本触发"没听清"
+            } else {
+                onResult("语音识别: $errorMsg", true)  // 其他错误 → 显示错误信息
+            }
         }
 
         override fun onEvent(eventType: Int, params: Bundle?) {}

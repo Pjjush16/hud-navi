@@ -174,7 +174,9 @@ class VoicePipeline(
         // 先暂停唤醒词检测，释放 AudioRecord，避免和 ASR 抢麦克风
         onnxWakeEngine?.stop()
         wakeWordManager?.stop()
-        handler.postDelayed({ startListening() }, 800)  // 800ms 等待 AudioRecord 完全释放+新 recognizer 创建
+        // 播放"我在"反馈音（Siri 风格：唤醒后立即给用户听觉确认）
+        chatEngine?.speak("我在")
+        handler.postDelayed({ startListening() }, 1200)  // 1200ms: 等"我在"播完 + AudioRecord 完全释放
     }
 
     private fun startListening() {
@@ -183,8 +185,15 @@ class VoicePipeline(
     }
 
     private fun resumeWakeDetection() {
-        onnxWakeEngine?.start()
-        wakeWordManager?.start()
+        Log.i(TAG, "Resuming wake detection...")
+        // 确保 ASR 已释放麦克风
+        voiceCommandManager?.cancelListening()
+        // 短暂延迟确保 AudioRecord 完全释放
+        handler.postDelayed({
+            onnxWakeEngine?.start()
+            wakeWordManager?.start()
+            Log.i(TAG, "Wake detection resumed (ONNX=${onnxWakeEngine?.isReady}, Sherpa=${wakeWordManager?.isReady()})")
+        }, 300)
     }
 
     private fun onAsrResult(text: String, isFinal: Boolean) {

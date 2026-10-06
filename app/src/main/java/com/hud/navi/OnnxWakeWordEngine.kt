@@ -166,11 +166,15 @@ class OnnxWakeWordEngine(
 
     fun stop() {
         running.set(false)
-        listenThread?.interrupt()
+        val thread = listenThread
         listenThread = null
+        // 先等线程自然退出（running=false 后循环最多再跑一个 80ms read）
+        try { thread?.join(300) } catch (_: Exception) {}
+        // 线程退出后再释放 AudioRecord，避免和读取循环竞争
         try { audioRecord?.stop() } catch (_: Exception) {}
         try { audioRecord?.release() } catch (_: Exception) {}
         audioRecord = null
+        Log.d(TAG, "Stopped (thread joined, AudioRecord released)")
     }
 
     fun release() {
