@@ -144,8 +144,6 @@ class HudView @JvmOverloads constructor(
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
     }
-        strokeWidth = 2f; strokeJoin = Paint.Join.ROUND
-    }
 
     private val snapGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0x3300FF88.toInt(); style = Paint.Style.FILL
