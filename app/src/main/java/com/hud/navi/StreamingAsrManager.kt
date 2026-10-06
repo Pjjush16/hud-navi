@@ -117,7 +117,7 @@ class StreamingAsrManager(
                 enableEndpoint = true
             )
 
-            recognizer = OnlineRecognizer(config)
+            recognizer = OnlineRecognizer(null, config)
             isReady = true
             Log.i(TAG, "StreamingAsrManager initialized (Transducer, 24MB)")
             return true
