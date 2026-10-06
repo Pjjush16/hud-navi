@@ -574,7 +574,10 @@ class IntentClassifier(
 
         if (toolCallsMap.isNotEmpty()) {
             val toolCallsArray = JSONArray()
-            toolCallsMap.toSortedMap().forEach { (_, tc) -> toolCallsArray.put(tc) }
+            val sortedKeys = toolCallsMap.keys.sorted()
+            for (key in sortedKeys) {
+                toolCallsArray.put(toolCallsMap[key]!!)
+            }
             message.put("tool_calls", toolCallsArray)
         }
 
