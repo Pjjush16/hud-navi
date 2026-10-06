@@ -139,13 +139,6 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private var snapBlend = 0.0  // 0=原始GPS, 1=完全吸附
     private var snapInit = false
 
-    // === 路口检测 ===
-    private var intersections: List<IntersectionNode> = emptyList()
-    private var nearIntersection = false
-    private var matchedBranchHeading = Float.NaN
-    private var lastIntersectionTime = 0L
-    private var branchLockFrames = 0
-
     // 传感器
     private val accData = FloatArray(3)
     private val magData = FloatArray(3)
@@ -197,11 +190,6 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         private const val HEADING_DEAD_ZONE = 2.5f
         private const val FREEZE_ACC_THRESHOLD = 0.5f
         private const val FREEZE_SPEED_THRESHOLD = 2f
-        private const val INTERSECTION_NODE_DIST = 15.0
-        private const val INTERSECTION_DETECT_RADIUS = 50.0
-        private const val BRANCH_SAMPLE_DIST = 30.0
-        private const val BRANCH_HEADING_TOLERANCE = 35f
-        private const val BRANCH_LOCK_MIN_FRAMES = 30
     }
 
     // === HMM 地图匹配 ===
@@ -214,138 +202,6 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private val HMM_SEARCH_RADIUS = 50.0
     private val HMM_MIN_CONFIDENCE = 0.1
     private val HMM_SPEED_GATE = 3f
-
-    data class IntersectionNode(
-        val lat: Double,
-        val lng: Double,
-        val branches: List<BranchInfo>
-    )
-
-    data class BranchInfo(
-        val heading: Float,
-        val segmentIdx: Int,
-        val pointIdx: Int,
-        val nextLat: Double,
-        val nextLng: Double
-    )
-
-    private fun buildIntersections(segments: List<RoadFetcher.RoadSegment>): List<IntersectionNode> {
-        if (segments.isEmpty()) return emptyList()
-
-        val endpoints = mutableListOf<Triple<Double, Double, Pair<Int, Int>>>()
-        for ((sIdx, seg) in segments.withIndex()) {
-            if (seg.points.size < 2) continue
-            endpoints.add(Triple(seg.points.first().first, seg.points.first().second, Pair(sIdx, 0)))
-            endpoints.add(Triple(seg.points.last().first, seg.points.last().second, Pair(sIdx, seg.points.size - 1)))
-        }
-
-        val used = BooleanArray(endpoints.size)
-        val clusters = mutableListOf<List<Triple<Double, Double, Pair<Int, Int>>>>()
-
-        for (i in endpoints.indices) {
-            if (used[i]) continue
-            val cluster = mutableListOf(endpoints[i])
-            used[i] = true
-            for (j in i + 1 until endpoints.size) {
-                if (used[j]) continue
-                val d = RoadFetcher.haversine(endpoints[i].first, endpoints[i].second,
-                    endpoints[j].first, endpoints[j].second)
-                if (d < INTERSECTION_NODE_DIST) {
-                    cluster.add(endpoints[j])
-                    used[j] = true
-                }
-            }
-            clusters.add(cluster)
-        }
-
-        val result = mutableListOf<IntersectionNode>()
-        for (cluster in clusters) {
-            val distinctSegments = cluster.map { it.third.first }.toSet()
-            if (distinctSegments.size < 2) continue
-
-            val centerLat = cluster.map { it.first }.average()
-            val centerLng = cluster.map { it.second }.average()
-
-            val branches = mutableListOf<BranchInfo>()
-            for (ep in cluster) {
-                val sIdx = ep.third.first
-                val pIdx = ep.third.second
-                val seg = segments[sIdx]
-
-                val forwardIdx = when {
-                    pIdx == 0 && seg.points.size > 1 -> 1
-                    pIdx == seg.points.size - 1 && seg.points.size > 1 -> pIdx - 1
-                    else -> continue
-                }
-
-                val (fromLat, fromLng) = seg.points[pIdx]
-                val (toLat, toLng) = seg.points[forwardIdx]
-                val heading = bearingBetween(fromLat, fromLng, toLat, toLng)
-                val finalHeading = if (pIdx > 0 && pIdx == seg.points.size - 1) {
-                    (heading + 180f) % 360f
-                } else heading
-
-                val headingRad = Math.toRadians(finalHeading.toDouble())
-                val sampleLat = centerLat + BRANCH_SAMPLE_DIST * cos(headingRad) / 111111.0
-                val sampleLng = centerLng + BRANCH_SAMPLE_DIST * sin(headingRad) / (111111.0 * cos(Math.toRadians(centerLat)))
-
-                branches.add(BranchInfo(finalHeading, sIdx, pIdx, sampleLat, sampleLng))
-            }
-
-            if (branches.size >= 2) {
-                result.add(IntersectionNode(centerLat, centerLng, branches))
-            }
-        }
-
-        Log.i(TAG, "Built ${result.size} intersection nodes from ${segments.size} segments")
-        return result
-    }
-
-    private fun matchBranchAtIntersection(lat: Double, lng: Double, compass: Float): BranchInfo? {
-        if (!nearIntersection) return null
-        var nearestInt: IntersectionNode? = null
-        var nearestDist = Double.MAX_VALUE
-        for (inter in intersections) {
-            val d = RoadFetcher.haversine(lat, lng, inter.lat, inter.lng)
-            if (d < nearestDist) { nearestDist = d; nearestInt = inter }
-        }
-        if (nearestInt == null || nearestDist > INTERSECTION_DETECT_RADIUS) return null
-
-        var bestBranch: BranchInfo? = null
-        var bestDiff = Float.MAX_VALUE
-        for (branch in nearestInt.branches) {
-            val diff = abs(((branch.heading - compass + 540f) % 360f) - 180f)
-            if (diff < bestDiff) { bestDiff = diff; bestBranch = branch }
-        }
-        if (bestBranch == null || bestDiff > BRANCH_HEADING_TOLERANCE) return null
-        return bestBranch
-    }
-
-    private fun snapToRoadAtIntersection(
-        lat: Double, lng: Double, speedKmh: Float, branch: BranchInfo
-    ): Pair<Double, Double>? {
-        if (!hudView.hasRoads) return null
-        val segment = hudView.roadSegments.getOrNull(branch.segmentIdx) ?: return null
-        val points = segment.points
-        if (points.size < 2) return null
-
-        var minDist = Double.MAX_VALUE
-        var bestLat = lat; var bestLng = lng
-        for (i in 0 until points.size - 1) {
-            val (lat1, lng1) = points[i]; val (lat2, lng2) = points[i + 1]
-            val dx = lng2 - lng1; val dy = lat2 - lat1
-            val lenSq = dx * dx + dy * dy
-            if (lenSq < 1e-12) continue
-            val t = ((lng - lng1) * dx + (lat - lat1) * dy) / lenSq
-            val clampedT = t.coerceIn(0.0, 1.0)
-            val projLat = lat1 + clampedT * dy; val projLng = lng1 + clampedT * dx
-            val dist = RoadFetcher.haversine(lat, lng, projLat, projLng)
-            if (dist < minDist) { minDist = dist; bestLat = projLat; bestLng = projLng }
-        }
-        if (minDist > INTERSECTION_DETECT_RADIUS) return null
-        val blendRatio = 0.8
-        return Pair(lat + (bestLat - lat) * blendRatio, lng + (bestLng - lng) * blendRatio)
-    }
 
     private fun bearingBetween(lat1: Double, lng1: Double, lat2: Double, lng2: Double): Float {
         val dLng = lng2 - lng1
@@ -445,7 +301,6 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         val diskSegments = RoadFetcher.loadDiskCache()
         if (diskSegments.isNotEmpty()) {
             hudView.setRoads(diskSegments, 0.0, 0.0)
-            intersections = buildIntersections(diskSegments)
             RoadFetcher.markRendered()
             Log.i(TAG, "Loaded ${diskSegments.size} cached segments at startup (marked as rendered)")
         }
@@ -844,9 +699,8 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 // 只有数据变了才重绘，避免无谓的屏幕刷新
                 if (result.needRerender) {
                     hudView.setRoads(result.segments, targetLat, targetLng)
-                    intersections = buildIntersections(result.segments)
                     RoadFetcher.markRendered()
-                    Log.i(TAG, "Roads updated: ${result.segments.size} segments, ${intersections.size} intersections (data changed)")
+                    Log.i(TAG, "Roads updated: ${result.segments.size} segments (data changed)")
                 } else {
                     Log.i(TAG, "Roads unchanged (hash match), skip rerender")
                 }
@@ -861,8 +715,6 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         val dt = if (lastFrameTime == 0L) 16L else (now - lastFrameTime).coerceIn(1L, 100L)
         lastFrameTime = now
 
-        detectIntersection()
-
         // === v10.20: 传递罗盘数据给 EKF ===
         if (hasRotationVector && rvInitialized) {
             ekf.updateCompass(rvHeadingSmooth)
@@ -870,27 +722,18 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             ekf.updateCompass(compassBearing)
         }
 
-        // v10.21: 传递线性加速度幅度给 EKF，用于零速检测（ZUPT）
+        // v10.21: 传递线性加速度幅度给 EKF
         val linearAccelMag = kotlin.math.sqrt(
             smoothedWorldAcc[0].toDouble() * smoothedWorldAcc[0].toDouble() +
             smoothedWorldAcc[1].toDouble() * smoothedWorldAcc[1].toDouble() +
             smoothedWorldAcc[2].toDouble() * smoothedWorldAcc[2].toDouble()
         )
-        // v15.0: 路口状态传给 EKF，让 EKF 处理路口位置延迟/停车
-        ekf.isNearIntersection = nearIntersection
-        // GPS 确认转向：branchLockFrames 达到阈值说明 GPS 已明确确认用户走向哪个分支
-        ekf.gpsConfirmedTurn = branchLockFrames >= BRANCH_LOCK_MIN_FRAMES
 
         ekf.predict(dt, vehicleBearing, targetSpeed * 1000f / 3600f, linearAccelMag,
             worldAccN = smoothedWorldAcc[0].toDouble(),
             worldAccE = smoothedWorldAcc[1].toDouble())
 
-        // v15.0: 路口场景用 EKF 的绘制位置（延迟/停车策略）
-        if (nearIntersection) {
-            vehicleLat = ekf.drawLat; vehicleLng = ekf.drawLng
-        } else {
-            vehicleLat = ekf.lat; vehicleLng = ekf.lng
-        }
+        vehicleLat = ekf.lat; vehicleLng = ekf.lng
 
         val gyroActive = hasGyro && (System.currentTimeMillis() - lastGyroTime) < 500
         val dtSec = dt / 1000.0
@@ -901,11 +744,6 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         }
 
         val newBearing = when {
-            nearIntersection && !matchedBranchHeading.isNaN() -> {
-                val diff = ((matchedBranchHeading - headingFromGyro + 540f) % 360f) - 180f
-                if (abs(diff) < HEADING_DEAD_ZONE) headingFromGyro
-                else headingFromGyro + diff * 0.3f
-            }
             targetSpeed > 1f -> {
                 val diff = ((targetBearing - headingFromGyro + 540f) % 360f) - 180f
                 val anchorRate = when {
@@ -930,15 +768,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         val adaptiveSigma = maxOf(HMM_SIGMA, ekfUncertainty)
 
         var snapped: Pair<Double, Double>? = null
-        if (nearIntersection && !matchedBranchHeading.isNaN()) {
-            val branch = matchBranchAtIntersection(vehicleLat, vehicleLng, vehicleBearing)
-            if (branch != null) {
-                snapped = snapToRoadAtIntersection(vehicleLat, vehicleLng, targetSpeed, branch)
-            }
-        }
-        if (snapped == null) {
-            snapped = hmmMapMatchWithSigma(vehicleLat, vehicleLng, targetSpeed, vehicleBearing, adaptiveSigma)
-        }
+        snapped = hmmMapMatchWithSigma(vehicleLat, vehicleLng, targetSpeed, vehicleBearing, adaptiveSigma)
 
         // === v10.20: 路网吸附仅作为微调注入 EKF（不再控制惯导激活） ===
         if (snapped != null && hmmConfidence > HMM_MIN_CONFIDENCE) {
@@ -998,48 +828,12 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
         hudView.vehicleBearing = vehicleBearing
         // v15.0: 路口场景用 EKF 的绘制速度（GPS 平滑速度）
-        hudView.vehicleSpeed = ((if (nearIntersection) ekf.drawSpeed else ekf.speed) * 3.6).toFloat()
+        hudView.vehicleSpeed = (ekf.speed * 3.6).toFloat()
 
         // v14.0: MapLibre 相机跟随（45° 倾斜 + 车头方向 + 动态缩放）
         updateMapLibreCamera()
 
         hudView.invalidate()
-    }
-
-    private fun detectIntersection() {
-        if (intersections.isEmpty()) {
-            nearIntersection = false; matchedBranchHeading = Float.NaN; return
-        }
-
-        var inIntersection = false
-        var nearestDist = Double.MAX_VALUE
-        for (inter in intersections) {
-            val d = RoadFetcher.haversine(vehicleLat, vehicleLng, inter.lat, inter.lng)
-            if (d < nearestDist) nearestDist = d
-            if (d < INTERSECTION_DETECT_RADIUS) {
-                inIntersection = true
-            }
-        }
-
-        // 传给 EKF 距离信息（即使不在路口范围内也传，用于 50m 减速）
-        ekf.distToIntersectionM = if (nearestDist < 100.0) nearestDist else 999.0
-
-        if (inIntersection) {
-            nearIntersection = true; lastIntersectionTime = System.currentTimeMillis()
-            val branch = matchBranchAtIntersection(vehicleLat, vehicleLng, vehicleBearing)
-            if (branch != null) {
-                matchedBranchHeading = branch.heading; branchLockFrames++
-            } else if (branchLockFrames < BRANCH_LOCK_MIN_FRAMES) {
-                matchedBranchHeading = Float.NaN
-            }
-        } else {
-            if (nearIntersection && branchLockFrames > 0) {
-                branchLockFrames--
-                if (branchLockFrames == 0) { nearIntersection = false; matchedBranchHeading = Float.NaN }
-            } else {
-                nearIntersection = false; matchedBranchHeading = Float.NaN; branchLockFrames = 0
-            }
-        }
     }
 
     private fun hmmMapMatchWithSigma(

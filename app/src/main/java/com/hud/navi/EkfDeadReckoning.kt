@@ -1,17 +1,9 @@
 /*
- * EkfDeadReckoning.kt - v15.1 距离驱动路口减速
+ * EkfDeadReckoning.kt - v15.2 纯 GPS+EKF 定位
  *
- * 基于 v10.00 的 4 维 EKF（lat, lng, vN, vE），去掉 v14.0 的：
- * - 四元数姿态解算（互补滤波太信陀螺 → 姿态漂移）
- * - 7 维状态（零偏估计在路口不收敛）
- * - ZUPT（路口减速被误判为静止）
- * - 复杂协方差传播（交叉项耦合）
- *
- * v15.1 路口减速改为距离驱动：
- * - 距路口 50m 开始减速，每 10m 减 10%
- * - 距路口 10-2m 降到 3km/h
- * - 距路口 < 2m 车标停住，等 GPS 确认转向
- * - GPS 确认（branchLockFrames >= 阈值）后车标加速追上
+ * 基于 v10.00 的 4 维 EKF（lat, lng, vN, vE）。
+ * 去掉了所有路口减速/停车逻辑（v15.1 的距离驱动减速导致"引力弹弓"问题）。
+ * 车标位置 = EKF 输出的实时位置，不做任何延迟或减速。
  *
  * 状态向量 [4]: [lat, lng, vN, vE]
  */
@@ -67,27 +59,6 @@ class EkfDeadReckoning {
     var roadHeadingDeg = 0.0
     var snapConfidence = 0.0
 
-    // === 路口处理 ===
-    // 位置历史环形缓冲（存最近 3 秒，每帧一个点）
-    private val POS_HISTORY_SIZE = 150  // 3s / 20ms = 150 帧
-    private val posHistoryLat = DoubleArray(POS_HISTORY_SIZE)
-    private val posHistoryLng = DoubleArray(POS_HISTORY_SIZE)
-    private val posHistoryTime = LongArray(POS_HISTORY_SIZE)
-    private var posHistoryIdx = 0
-    private var posHistoryCount = 0
-
-    // 路口状态
-    var isNearIntersection = false
-    var distToIntersectionM = 999.0  // 距路口距离（米），外部设置
-    var gpsConfirmedTurn = false     // GPS 已确认转向方向
-    var drawLat = 0.0    // 绘制用位置（可能延迟）
-    var drawLng = 0.0
-    var drawSpeed = 0.0  // 绘制用速度（可能减速）
-
-    // GPS 速度 EMA（路口用）
-    private var gpsSmoothedSpeed = 0.0
-    private val GPS_SPEED_ALPHA = 0.2
-
     // === 初始化 ===
     fun initialize(lat: Double, lng: Double, bearing: Float, speedMs: Float, timeMs: Long) {
         this.lat = lat; this.lng = lng
@@ -105,13 +76,6 @@ class EkfDeadReckoning {
 
         lastGpsTimeMs = timeMs
         gpsLostTimeMs = 0L
-
-        drawLat = lat; drawLng = lng; drawSpeed = speed
-        gpsSmoothedSpeed = speed
-
-        // 初始化位置历史
-        posHistoryIdx = 0; posHistoryCount = 0
-
         initialized = true
     }
 
@@ -155,22 +119,14 @@ class EkfDeadReckoning {
         rvBearing = rvSmoothed
     }
 
-    // v14.0 的 IMU 接口（保留 API 兼容，但不做姿态解算）
+    // IMU 接口（保留 API 兼容）
     fun updateIMU(accel: FloatArray, gyro: FloatArray, timestampNs: Long) {
-        // 只提取陀螺 Z 轴（偏航角速度），不做四元数
         if (gyro.size >= 3) {
             updateGyroRate(Math.toDegrees(gyro[2].toDouble()).toFloat())
         }
     }
 
     // === 预测步（Predict）— 每帧调用 ===
-    //
-    // 参数兼容 v14.0 签名：predict(dtMs, headingDeg, speedMs, linearAccelMag, worldAccN, worldAccE)
-    // 但只用前 3 个参数（GPS bearing + speed），忽略 IMU 加速度积分
-    //
-    // 路口特殊处理：
-    // - 如果 nearIntersection，速度用 GPS EMA 而非 GPS 原始值
-    // - 位置历史入缓冲
 
     fun predict(dtMs: Long, headingDeg: Float = -1f, speedMs: Float = 0f,
                 linearAccelMag: Double = 999.0,
@@ -198,8 +154,8 @@ class EkfDeadReckoning {
         if (hDiff > 180) hDiff -= 360
         if (hDiff < -180) hDiff += 360
         val hAlpha = when {
-            gpsLost && gyroFresh -> 1.0   // 陀螺积分时完全信任
-            speedKmh > 3.0 -> 0.3         // GPS bearing 时适度信任
+            gpsLost && gyroFresh -> 1.0
+            speedKmh > 3.0 -> 0.3
             rvAvailable -> 0.25
             else -> 0.15
         }
@@ -209,9 +165,6 @@ class EkfDeadReckoning {
 
         // ── 速度处理 ──
         this.speed = speedMs.toDouble()
-
-        // GPS 速度 EMA（路口用）
-        gpsSmoothedSpeed += GPS_SPEED_ALPHA * (speedMs.toDouble() - gpsSmoothedSpeed)
 
         // 分解速度到北/东
         val headingRad = Math.toRadians(heading)
@@ -223,61 +176,10 @@ class EkfDeadReckoning {
         vN += speedAlpha * (newVN - vN)
         vE += speedAlpha * (newVE - vE)
 
-        // ── 路口特殊处理（距离驱动减速）──
-        if (isNearIntersection) {
-            val MIN_SPEED_MS = 0.83  // 3 km/h ≈ 0.83 m/s
-            
-            when {
-                // 距路口 > 50m：正常行驶
-                distToIntersectionM >= 50.0 -> {
-                    drawLat = lat; drawLng = lng
-                    drawSpeed = speed
-                }
-                
-                // 距路口 10-50m：线性减速
-                distToIntersectionM >= 10.0 -> {
-                    val decelFactor = distToIntersectionM / 50.0  // 50m时=1.0, 10m时=0.2
-                    drawSpeed = speed * decelFactor
-                    drawLat = lat; drawLng = lng
-                }
-                
-                // 距路口 < 10m：降到 3km/h
-                distToIntersectionM >= 2.0 -> {
-                    drawSpeed = MIN_SPEED_MS.coerceAtMost(speed)
-                    drawLat = lat; drawLng = lng
-                }
-                
-                // 已到达路口（< 2m）：等待 GPS 确认转向
-                !gpsConfirmedTurn -> {
-                    drawSpeed = 0.0  // 车标停住
-                    // 不更新 drawLat/drawLng（车标停在路口）
-                }
-                
-                // GPS 已确认转向：车标加速追上
-                else -> {
-                    drawLat = lat; drawLng = lng
-                    drawSpeed = speed  // 恢复正常速度
-                }
-            }
-        } else {
-            // 正常场景：实时位置
-            drawLat = lat; drawLng = lng
-            drawSpeed = speed
-            // 离开路口后重置确认标志
-            gpsConfirmedTurn = false
-        }
-
         // ── 位置积分 ──
         val latRad = Math.toRadians(lat)
         lat += vN * dt / 111111.0
         lng += vE * dt / (111111.0 * cos(latRad).coerceAtLeast(0.01))
-
-        // 位置入历史缓冲
-        posHistoryLat[posHistoryIdx] = lat
-        posHistoryLng[posHistoryIdx] = lng
-        posHistoryTime[posHistoryIdx] = System.currentTimeMillis()
-        posHistoryIdx = (posHistoryIdx + 1) % POS_HISTORY_SIZE
-        if (posHistoryCount < POS_HISTORY_SIZE) posHistoryCount++
 
         // GPS 丢失衰减
         if (gpsLost) {
@@ -318,7 +220,6 @@ class EkfDeadReckoning {
             return
         }
 
-        // GPS 观测噪声（自适应）
         val accD = accuracy.toDouble().coerceAtLeast(1.0)
         gpsR = when {
             accD < 5.0 -> accD
@@ -326,7 +227,6 @@ class EkfDeadReckoning {
             else -> accD * 5.0
         }.coerceAtLeast(GPS_R_FLOOR)
 
-        // 异常跳变检测（抗多径/城市峡谷）
         val yLat = gpsLat - lat
         val yLng = gpsLng - lng
         val innovMeters = sqrt(
@@ -335,7 +235,6 @@ class EkfDeadReckoning {
         )
         lastInnovation = innovMeters
 
-        // 跳变 >50m 时降权
         val effectiveR = if (innovMeters > 50.0) gpsR * 3.0 else gpsR
 
         val rLat = (effectiveR / 111111.0).pow(2)
@@ -347,23 +246,19 @@ class EkfDeadReckoning {
         val kLng = P[1][1] / sLng
         lastKalmanGain = maxOf(kLat, kLng)
 
-        // 状态更新
         lat += kLat * yLat
         lng += kLng * yLng
 
-        // 速度小幅校正
         val gpsInterval = maxOf(0.5, (timeMs - lastGpsTimeMs).toDouble() / 1000.0)
         val kV = 0.1 * maxOf(kLat, kLng)
         vN += kV * (yLat * 111111.0 / gpsInterval)
         vE += kV * (yLng * 111111.0 * cos(Math.toRadians(lat)).coerceAtLeast(0.01) / gpsInterval)
 
-        // 协方差更新
         P[0][0] *= (1.0 - kLat)
         P[1][1] *= (1.0 - kLng)
         P[2][2] *= (1.0 - kV)
         P[3][3] *= (1.0 - kV)
 
-        // 交叉项衰减
         P[0][2] *= 0.5; P[2][0] *= 0.5
         P[1][3] *= 0.5; P[3][1] *= 0.5
 
@@ -371,7 +266,7 @@ class EkfDeadReckoning {
         gpsLostTimeMs = 0L
     }
 
-    // === 路网约束更新（v10.20 简化版）===
+    // === 路网约束更新 ===
 
     fun roadConstrainedUpdate(snapLat: Double, snapLng: Double, confidence: Double,
                                roadHeading: Float, timeMs: Long) {
@@ -399,32 +294,6 @@ class EkfDeadReckoning {
         P[1][1] *= (1.0 - kLng * scale)
     }
 
-    // === 位置历史查询 ===
-
-    /**
-     * 获取 N 毫秒前的位置
-     * @return Pair(lat, lng) 或 null（历史不够）
-     */
-    fun getDelayedPosition(delayMs: Long): Pair<Double, Double>? {
-        if (posHistoryCount < 2) return null
-
-        val targetTime = System.currentTimeMillis() - delayMs
-
-        // 在环形缓冲中找最接近 targetTime 的点
-        var bestIdx = -1
-        var bestDiff = Long.MAX_VALUE
-        for (i in 0 until posHistoryCount) {
-            val diff = abs(posHistoryTime[i] - targetTime)
-            if (diff < bestDiff) {
-                bestDiff = diff
-                bestIdx = i
-            }
-        }
-
-        if (bestIdx < 0 || bestDiff > delayMs) return null
-        return Pair(posHistoryLat[bestIdx], posHistoryLng[bestIdx])
-    }
-
     // === 查询接口 ===
 
     fun getPositionUncertainty(): Double {
@@ -444,9 +313,8 @@ class EkfDeadReckoning {
             else -> "惯导"
         }
         val mode = if (gpsAge < 2000) "GPS+IMU" else "IMU-DR"
-        val interTag = if (isNearIntersection) "⊕路口" else ""
         val snapTag = if (snappedToRoad && snapConfidence > 0.3) "⊕路" else ""
-        return "$mode[$headingSource]$interTag$snapTag " +
+        return "$mode[$headingSource]$snapTag " +
                 "K=${String.format("%.2f", lastKalmanGain)} " +
                 "Δ=${String.format("%.1f", lastInnovation)}m " +
                 "σ=${String.format("%.1f", unc)}m"
