@@ -234,7 +234,7 @@ class StreamingAsrManager(
 
                 // 解码
                 while (rec.isReady(stream)) {
-                    rec.decodeStream(stream)
+                    rec.decode(stream)
                 }
 
                 // 获取当前识别结果

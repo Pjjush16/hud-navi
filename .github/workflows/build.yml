@@ -67,6 +67,22 @@ jobs:
           echo "=== Assets ==="
           du -sh app/src/main/assets/
 
+      - name: Download ASR Model (Streaming Zipformer 24MB)
+        run: |
+          ASR_DIR="app/src/main/assets/asr"
+          mkdir -p "$ASR_DIR"
+          if [ ! -f "$ASR_DIR/tokens.txt" ]; then
+            wget -q "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23-mobile.tar.bz2" -O /tmp/asr-model.tar.bz2
+            tar xjf /tmp/asr-model.tar.bz2 -C /tmp/
+            cp /tmp/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23-mobile/encoder-epoch-99-avg-1.int8.onnx "$ASR_DIR/encoder.int8.onnx"
+            cp /tmp/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23-mobile/decoder-epoch-99-avg-1.onnx "$ASR_DIR/decoder.onnx"
+            cp /tmp/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23-mobile/joiner-epoch-99-avg-1.int8.onnx "$ASR_DIR/joiner.int8.onnx"
+            cp /tmp/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23-mobile/tokens.txt "$ASR_DIR/tokens.txt"
+            echo "ASR model downloaded (24MB)"
+          fi
+          echo "=== Assets ==="
+          du -sh app/src/main/assets/
+
       - name: Build Debug APK
         run: ./gradlew assembleDebug
 
