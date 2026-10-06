@@ -89,6 +89,12 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private var wakeWordEnabled = false
     private var pipelineReady = false
 
+    // === OSRM 路线规划 (v13.14) ===
+    private var osrmRouter: OsrmRouter? = null
+
+    // === HTTP API 服务器 (v13.14) ===
+    private var apiServer: ApiServer? = null
+
     // === 唤醒反馈 UI（通过 gravity 跟随镜像同步切换位置） ===
     private lateinit var wakeFeedback: FrameLayout
     private lateinit var wakeFeedbackPanel: LinearLayout
@@ -396,6 +402,41 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     }
 
     private fun initWakeWord() {
+        // v13.14: 初始化 OSRM 路线规划
+        osrmRouter = OsrmRouter()
+
+        // v13.14: 初始化 HTTP API 服务器
+        apiServer = ApiServer(this, object : ApiActionHandler {
+            override fun onMapZoomIn() { handler.post { hudView.zoomOffset = (hudView.zoomOffset + 1.0f).coerceAtMost(3.0f); hudView.invalidate() } }
+            override fun onMapZoomOut() { handler.post { hudView.zoomOffset = (hudView.zoomOffset - 1.0f).coerceAtLeast(-3.0f); hudView.invalidate() } }
+            override fun onMapZoomReset() { handler.post { hudView.zoomOffset = 0f; hudView.invalidate() } }
+            override fun onMirrorToggle() { handler.post { hudView.mirrorEnabled = !hudView.mirrorEnabled; updateWakeFeedbackMirror() } }
+            override fun onMirrorOn() { handler.post { hudView.mirrorEnabled = true; updateWakeFeedbackMirror() } }
+            override fun onMirrorOff() { handler.post { hudView.mirrorEnabled = false; updateWakeFeedbackMirror() } }
+            override fun onNavigateTo(lat: Double, lng: Double, name: String) {
+                handler.post { startNavigationTo(lat, lng, name) }
+            }
+            override fun onNavigateCancel() { handler.post { cancelNavigation() } }
+            override fun onMusicPlay() { Log.i(TAG, "API: music play (placeholder)") }
+            override fun onMusicPause() { Log.i(TAG, "API: music pause (placeholder)") }
+            override fun onMusicNext() { Log.i(TAG, "API: music next (placeholder)") }
+            override fun onMusicPrev() { Log.i(TAG, "API: music prev (placeholder)") }
+            override fun onGetStatus(): org.json.JSONObject {
+                return org.json.JSONObject().apply {
+                    put("vehicle_lat", vehicleLat)
+                    put("vehicle_lng", vehicleLng)
+                    put("vehicle_speed", hudView.vehicleSpeed)
+                    put("vehicle_bearing", vehicleBearing)
+                    put("mirror_enabled", hudView.mirrorEnabled)
+                    put("zoom_offset", hudView.zoomOffset)
+                    put("navigation_active", hudView.navigationRoute.isNotEmpty())
+                    put("navigation_destination", hudView.navigationDestination ?: "")
+                }
+            }
+        })
+        apiServer?.startServer()
+        Log.i(TAG, "API server started on port ${apiServer?.getPort()}, key: ${apiServer?.getApiKey()}")
+
         // v11.0: 使用 VoicePipeline 统一管理语音交互
         try {
             voicePipeline = VoicePipeline(this, object : VoicePipelineCallback {
@@ -456,7 +497,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                         Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show()
                     }
                 }
-            })
+            }, osrmRouter, apiServer)
 
             voicePipeline?.init()
             pipelineReady = voicePipeline?.pipelineReady == true
@@ -508,6 +549,54 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 wakeFeedbackKeyword.text = command
             }
         }
+    }
+
+    /**
+     * 启动导航到指定坐标
+     */
+    private fun startNavigationTo(lat: Double, lng: Double, name: String) {
+        Log.i(TAG, "Starting navigation to: $name ($lat, $lng)")
+        Thread {
+            try {
+                val currentLat = vehicleLat
+                val currentLng = vehicleLng
+                if (currentLat == 0.0 || currentLng == 0.0) {
+                    handler.post {
+                        Toast.makeText(this, "无法获取当前位置", Toast.LENGTH_SHORT).show()
+                    }
+                    return@Thread
+                }
+                val route = osrmRouter?.route(Pair(currentLat, currentLng), Pair(lat, lng))
+                if (route != null && route.success) {
+                    handler.post {
+                        hudView.navigationRoute = route.geometry
+                        hudView.navigationDestination = name
+                        hudView.invalidate()
+                        Toast.makeText(this, "导航已启动: $name (${osrmRouter?.formatDistance(route.distance)}, ${osrmRouter?.formatDuration(route.duration)})", Toast.LENGTH_LONG).show()
+                    }
+                } else {
+                    handler.post {
+                        Toast.makeText(this, "路线规划失败: ${route?.error ?: "未知错误"}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Navigation failed: ${e.message}", e)
+                handler.post {
+                    Toast.makeText(this, "导航失败: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }.start()
+    }
+
+    /**
+     * 取消导航
+     */
+    private fun cancelNavigation() {
+        Log.i(TAG, "Navigation cancelled")
+        hudView.navigationRoute = emptyList()
+        hudView.navigationDestination = null
+        hudView.invalidate()
+        Toast.makeText(this, "导航已取消", Toast.LENGTH_SHORT).show()
     }
 
     private fun startHudForegroundService() {
@@ -617,6 +706,12 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         vehicleLat = ekf.lat; vehicleLng = ekf.lng
         hudView.vehicleLat = vehicleLat; hudView.vehicleLng = vehicleLng
         hudView.vehicleBearing = vehicleBearing; hudView.vehicleSpeed = targetSpeed
+
+        // v13.14: 更新 IntentClassifier 的当前位置（供导航使用）
+        voicePipeline?.let { pipeline ->
+            val classifier = pipeline.javaClass.getDeclaredField("intentClassifier").apply { isAccessible = true }.get(pipeline) as? IntentClassifier
+            classifier?.currentLocation = Pair(vehicleLat, vehicleLng)
+        }
 
         tryFetchRoads()
     }
@@ -998,6 +1093,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     override fun onDestroy() {
         stopRenderLoop()
         voicePipeline?.release()
+        apiServer?.stopServer()  // v13.14: 停止 API 服务器
         locationManager.removeUpdates(this)
         sensorManager.unregisterListener(this)
         handler.removeCallbacksAndMessages(null)

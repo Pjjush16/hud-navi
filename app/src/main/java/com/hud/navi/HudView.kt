@@ -69,6 +69,18 @@ class HudView @JvmOverloads constructor(
     // === 手动缩放偏移（语音控制：放大/缩小地图） ===
     var zoomOffset: Float = 0f  // -3.0 ~ +3.0，0 = 自动
 
+    // === 导航路线 ===
+    var navigationRoute: List<Pair<Double, Double>> = emptyList()  // [(lat, lng), ...]
+        set(value) {
+            field = value
+            postInvalidate()
+        }
+    var navigationDestination: String? = null
+        set(value) {
+            field = value
+            postInvalidate()
+        }
+
     // === 速度制动态缩放 ===
     private fun getDynamicZoom(speedKmh: Float): Float {
         val clamped = speedKmh.coerceIn(0f, 150f)
@@ -114,7 +126,24 @@ class HudView @JvmOverloads constructor(
         color = Color.WHITE; style = Paint.Style.FILL
     }
     private val vehicleStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE; style = Paint.Style.STROKE
+        color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 2f
+    }
+
+    // === 导航路线画笔 ===
+    private val routePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#00BFFF")  // 道奇蓝
+        style = Paint.Style.STROKE
+        strokeWidth = 6f
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
+    private val routeOutlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#003366")  // 深蓝轮廓
+        style = Paint.Style.STROKE
+        strokeWidth = 10f
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
         strokeWidth = 2f; strokeJoin = Paint.Join.ROUND
     }
 
@@ -170,6 +199,7 @@ class HudView @JvmOverloads constructor(
         val metersPerPixel = getMetersPerPixel(vehicleLat, dynamicZoom)
 
         drawRoadNetwork(canvas, w, h, metersPerPixel)
+        drawNavigationRoute(canvas, w, h, metersPerPixel)  // 导航路线
         drawVehicleMarker(canvas, w, h)
 
         // 速度显示（在镜像块内部，随镜像翻转）
@@ -294,6 +324,43 @@ class HudView @JvmOverloads constructor(
         val px = (dx / metersPerPixel).toFloat()
         val py = (-dy / metersPerPixel).toFloat()
         return Pair(px, py)
+    }
+
+    /**
+     * 绘制导航路线
+     */
+    private fun drawNavigationRoute(
+        canvas: Canvas, w: Float, h: Float,
+        metersPerPixel: Double
+    ) {
+        if (navigationRoute.isEmpty()) return
+
+        val centerLat = if (isSnapped) snappedLat else vehicleLat
+        val centerLng = if (isSnapped) snappedLng else vehicleLng
+
+        canvas.save()
+        canvas.translate(w / 2f, h * 0.55f)
+        canvas.rotate(-vehicleBearing)
+
+        // 构建路线路径
+        val routePath = Path()
+        var first = true
+        for ((lat, lng) in navigationRoute) {
+            val (px, py) = latLngToPixel(lat, lng, centerLat, centerLng, metersPerPixel)
+            if (first) {
+                routePath.moveTo(px, py)
+                first = false
+            } else {
+                routePath.lineTo(px, py)
+            }
+        }
+
+        // 先画深色轮廓（增加对比度）
+        canvas.drawPath(routePath, routeOutlinePaint)
+        // 再画蓝色路线
+        canvas.drawPath(routePath, routePaint)
+
+        canvas.restore()
     }
 
     private fun getMetersPerPixel(lat: Double, zoom: Float): Double {

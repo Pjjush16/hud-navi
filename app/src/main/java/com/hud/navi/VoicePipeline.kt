@@ -32,7 +32,9 @@ interface VoicePipelineCallback {
 
 class VoicePipeline(
     private val context: Context,
-    private val callback: VoicePipelineCallback
+    private val callback: VoicePipelineCallback,
+    private val osrmRouter: OsrmRouter? = null,
+    private val apiServer: ApiServer? = null
 ) {
     companion object {
         private const val TAG = "VoicePipeline"
@@ -111,9 +113,9 @@ class VoicePipeline(
             errors.add("意图分类: ${e.message}")
         }
 
-        // 4. 聊天引擎 + TTS
+        // 4. 聊天引擎 + TTS（传入 OSRM 和 API 服务器）
         try {
-            chatEngine = ChatEngine(context, intentClassifier!!, webSearchClient!!)
+            chatEngine = ChatEngine(context, intentClassifier!!, webSearchClient!!, osrmRouter, apiServer)
             chatEngine?.init()
         } catch (e: Exception) {
             errors.add("聊天引擎: ${e.message}")

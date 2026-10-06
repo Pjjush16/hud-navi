@@ -16,7 +16,9 @@ import java.util.Locale
 class ChatEngine(
     private val context: Context,
     private val intentClassifier: IntentClassifier,
-    private val webSearchClient: WebSearchClient
+    private val webSearchClient: WebSearchClient,
+    private val osrmRouter: OsrmRouter? = null,
+    private val apiServer: ApiServer? = null
 ) : TextToSpeech.OnInitListener {
 
     companion object {
@@ -27,6 +29,12 @@ class ChatEngine(
     private var tts: TextToSpeech? = null
     private var ttsReady = false
     private var onTtsDone: (() -> Unit)? = null
+
+    // 导航状态
+    var currentDestination: String? = null
+        private set
+    var currentRoute: RouteResult? = null
+        private set
 
     /**
      * 初始化 TTS 引擎
@@ -96,14 +104,29 @@ class ChatEngine(
     // ==================== 意图处理器 ====================
 
     /**
-     * 导航意图 — 搜索 POI / 设置目的地
+     * 导航意图 — 搜索 POI / 开始导航 / 取消导航
      */
     private fun handleNavigation(result: IntentResult, callback: ((String) -> Unit)?) {
-        val keyword = result.params["keyword"] as? String ?: ""
         val action = result.action
 
         when (action) {
+            "cancel" -> {
+                currentDestination = null
+                currentRoute = null
+                speak("已取消导航")
+                callback?.invoke("NAVIGATION_CANCEL")
+            }
+            "navigate_to" -> {
+                val destination = result.params["destination"] as? String ?: ""
+                if (destination.isBlank()) {
+                    speak("请告诉我你要去哪里？")
+                    callback?.invoke("请说出目的地")
+                    return
+                }
+                startNavigation(destination, callback)
+            }
             "search_poi" -> {
+                val keyword = result.params["keyword"] as? String ?: ""
                 if (keyword.isNotBlank()) {
                     val sort = result.params["sort"] as? String ?: ""
                     val response = if (sort == "nearest") {
@@ -114,8 +137,7 @@ class ChatEngine(
                     speak(response)
                     callback?.invoke("🔍 搜索: $keyword")
 
-                    // TODO: 对接 OpenStreetMap Overpass API 搜索 POI
-                    // 目前先通过 WebSearch 提供信息
+                    // 通过 WebSearch 搜索 POI
                     Thread {
                         val searchResult = webSearchClient.search("附近 $keyword")
                         if (searchResult.success) {
@@ -130,9 +152,105 @@ class ChatEngine(
                 }
             }
             else -> {
-                speak("好的，$keyword")
-                callback?.invoke("导航: $keyword")
+                speak("好的，导航功能已就绪")
+                callback?.invoke("导航: 就绪")
             }
+        }
+    }
+
+    /**
+     * 开始导航到目的地
+     */
+    private fun startNavigation(destination: String, callback: ((String) -> Unit)?) {
+        speak("正在规划到${destination}的路线...")
+        callback?.invoke("🗺️ 规划路线: $destination")
+
+        Thread {
+            try {
+                // 首先通过 WebSearch 获取目的地的经纬度
+                val locationInfo = geocodeDestination(destination)
+                if (locationInfo == null) {
+                    speak("抱歉，无法找到${destination}的位置")
+                    callback?.invoke("未找到: $destination")
+                    return@Thread
+                }
+
+                // 获取当前位置
+                val currentLocation = intentClassifier.currentLocation
+                if (currentLocation == null) {
+                    speak("无法获取当前位置，请确保 GPS 已开启")
+                    callback?.invoke("GPS 未就绪")
+                    return@Thread
+                }
+
+                // 使用 OSRM 规划路线
+                val route = osrmRouter?.route(currentLocation, locationInfo.first)
+                if (route == null || !route.success) {
+                    speak("路线规划失败，请稍后再试")
+                    callback?.invoke("路线规划失败")
+                    return@Thread
+                }
+
+                // 保存导航状态
+                currentDestination = destination
+                currentRoute = route
+
+                // 播报导航信息
+                val distanceStr = osrmRouter?.formatDistance(route.distance) ?: "${(route.distance/1000).toInt()}公里"
+                val durationStr = osrmRouter?.formatDuration(route.duration) ?: "${(route.duration/60).toInt()}分钟"
+                val summary = "路线规划完成，全程${distanceStr}，预计${durationStr}"
+                speak(summary)
+                callback?.invoke("NAVIGATION_START|$destination|$distanceStr|$durationStr")
+
+                // 播报前几个导航步骤
+                if (route.steps.isNotEmpty()) {
+                    val firstSteps = route.steps.take(3).map { it.instruction }.joinToString("，然后")
+                    speak("首先${firstSteps}")
+                }
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Navigation failed: ${e.message}", e)
+                speak("导航启动失败")
+                callback?.invoke("导航失败")
+            }
+        }.start()
+    }
+
+    /**
+     * 地理编码：将地名转换为经纬度
+     * 使用 Nominatim (OpenStreetMap) API
+     */
+    private fun geocodeDestination(query: String): Pair<Pair<Double, Double>, String>? {
+        try {
+            val url = java.net.URL("https://nominatim.openstreetmap.org/search?q=${java.net.URLEncoder.encode(query, "UTF-8")}&format=json&limit=1")
+            val conn = url.openConnection() as java.net.HttpURLConnection
+            conn.connectTimeout = 5000
+            conn.readTimeout = 5000
+            conn.requestMethod = "GET"
+            conn.setRequestProperty("User-Agent", "hud-navi/1.0")
+
+            val responseCode = conn.responseCode
+            if (responseCode != 200) {
+                conn.disconnect()
+                return null
+            }
+
+            val responseBody = java.io.BufferedReader(java.io.InputStreamReader(conn.inputStream, "UTF-8")).use { it.readText() }
+            conn.disconnect()
+
+            val json = org.json.JSONArray(responseBody)
+            if (json.length() == 0) return null
+
+            val place = json.getJSONObject(0)
+            val lat = place.getDouble("lat")
+            val lon = place.getDouble("lon")
+            val displayName = place.optString("display_name", query)
+
+            return Pair(Pair(lat, lon), displayName)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Geocoding failed: ${e.message}", e)
+            return null
         }
     }
 

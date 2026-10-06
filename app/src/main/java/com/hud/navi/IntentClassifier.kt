@@ -74,6 +74,8 @@ class IntentClassifier(
 
         // ==================== 关键词规则（降级用） ====================
         private val NAV_KEYWORDS = listOf("导航", "去哪", "路线", "带路", "怎么走")
+        private val NAV_START = listOf("开始导航", "导航去", "导航到", "带我去", "去")
+        private val NAV_CANCEL = listOf("取消导航", "停止导航", "关闭导航", "结束导航")
         private val POI_KEYWORDS = listOf("加油站", "停车场", "停车", "厕所", "洗手间", "医院",
             "餐厅", "饭店", "酒店", "超市", "商场", "银行", "充电桩", "洗车")
         private val SEARCH_KEYWORDS = listOf("搜索", "搜一下", "查一下", "帮我搜", "帮我查", "看看", "告诉我", "什么是")
@@ -99,6 +101,9 @@ class IntentClassifier(
 
     val hasApiKey: Boolean get() = apiKey.isNotBlank()
     val mode: String get() = if (hasApiKey) "Cloud(${modelId})" else "Keyword"
+
+    // 当前位置（由 MainActivity 更新）
+    var currentLocation: Pair<Double, Double>? = null
 
     /**
      * 检查引擎是否可用
@@ -442,7 +447,19 @@ class IntentClassifier(
         if (MAP_ZOOM_OUT.any { text.contains(it) })
             return IntentResult(IntentResult.INTENT_HUD_CONTROL, "map_zoom_out", emptyMap(), userText)
 
-        // 导航
+        // 导航取消（优先匹配）
+        if (NAV_CANCEL.any { text.contains(it) }) {
+            return IntentResult(IntentResult.INTENT_NAVIGATION, "cancel", emptyMap(), userText)
+        }
+
+        // 导航开始（带目的地）
+        if (NAV_START.any { text.contains(it) }) {
+            val keyword = extractDestination(text)
+            return IntentResult(IntentResult.INTENT_NAVIGATION, "navigate_to",
+                buildMap { if (keyword.isNotBlank()) put("destination", keyword) }, userText)
+        }
+
+        // 导航（POI 搜索）
         if (NAV_KEYWORDS.any { text.contains(it) }) {
             val keyword = extractDestination(text)
             val sort = if (text.contains("最近") || text.contains("附近") || text.contains("近")) "nearest" else ""

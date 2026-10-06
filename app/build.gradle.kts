@@ -11,8 +11,8 @@ android {
         applicationId = "com.hud.navi"
         minSdk = 24  // ONNX Runtime 1.18 requires API 24+
         targetSdk = 34
-        versionCode = 63
-        versionName = "13.13"
+        versionCode = 64
+        versionName = "13.14"
     }
 
     // ABI 分包
@@ -70,6 +70,9 @@ dependencies {
 
     // sherpa-onnx: 离线关键词识别（中文唤醒词）— 保留作为备用
     implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar", "*.jar"))))
+
+    // NanoHTTPD: 轻量级嵌入式 HTTP 服务器（用于 API 端口）
+    implementation("org.nanohttpd:nanohttpd:2.3.1")
 
     // ONNX Runtime: 自训练唤醒词模型推理
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.18.0")
