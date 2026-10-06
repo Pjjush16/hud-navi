@@ -4,8 +4,7 @@
   "sources": {
     "osm": {
       "type": "vector",
-      "tiles": ["https://tiles.openfreemap.org/planet/{z}/{x}/{y}.pbf"],
-      "maxzoom": 14
+      "url": "https://tiles.openfreemap.org/planet/tilejson.json"
     }
   },
   "glyphs": "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf",
@@ -13,30 +12,48 @@
     {
       "id": "background",
       "type": "background",
-      "paint": { "background-color": "#000000" }
+      "paint": {
+        "background-color": "#000000"
+      }
     },
     {
       "id": "water",
       "type": "fill",
       "source": "osm",
       "source-layer": "water",
-      "paint": { "fill-color": "#0a1a2a" }
+      "paint": {
+        "fill-color": "#0a1a2a"
+      }
     },
     {
       "id": "landcover-wood",
       "type": "fill",
       "source": "osm",
       "source-layer": "landcover",
-      "filter": ["==", "class", "wood"],
-      "paint": { "fill-color": "#0a120a" }
+      "filter": [
+        "==",
+        "class",
+        "wood"
+      ],
+      "paint": {
+        "fill-color": "#0a120a"
+      }
     },
     {
       "id": "landuse-residential",
       "type": "fill",
       "source": "osm",
       "source-layer": "landuse",
-      "filter": ["in", "class", "residential", "commercial", "industrial"],
-      "paint": { "fill-color": "#111111" }
+      "filter": [
+        "in",
+        "class",
+        "residential",
+        "commercial",
+        "industrial"
+      ],
+      "paint": {
+        "fill-color": "#111111"
+      }
     },
     {
       "id": "building",
@@ -44,22 +61,59 @@
       "source": "osm",
       "source-layer": "building",
       "paint": {
-        "fill-extrusion-color": "#1a1a1a",
-        "fill-extrusion-height": ["get", "render_height"],
-        "fill-extrusion-base": ["get", "render_min_height"],
-        "fill-extrusion-opacity": 0.6
-      }
+        "fill-extrusion-color": "#1a1a2a",
+        "fill-extrusion-height": [
+          "coalesce",
+          [
+            "get",
+            "render_height"
+          ],
+          5
+        ],
+        "fill-extrusion-base": [
+          "coalesce",
+          [
+            "get",
+            "render_min_height"
+          ],
+          0
+        ],
+        "fill-extrusion-opacity": 0.7
+      },
+      "minzoom": 15
     },
     {
       "id": "road-motorway-casing",
       "type": "line",
       "source": "osm",
       "source-layer": "transportation",
-      "filter": ["==", "class", "motorway"],
-      "layout": { "line-cap": "round", "line-join": "round" },
+      "filter": [
+        "==",
+        "class",
+        "motorway"
+      ],
+      "layout": {
+        "line-cap": "round",
+        "line-join": "round"
+      },
       "paint": {
         "line-color": "#333300",
-        "line-width": { "stops": [[10, 4], [14, 12], [18, 24]] }
+        "line-width": {
+          "stops": [
+            [
+              10,
+              4
+            ],
+            [
+              14,
+              12
+            ],
+            [
+              18,
+              24
+            ]
+          ]
+        }
       }
     },
     {
@@ -67,11 +121,33 @@
       "type": "line",
       "source": "osm",
       "source-layer": "transportation",
-      "filter": ["==", "class", "trunk"],
-      "layout": { "line-cap": "round", "line-join": "round" },
+      "filter": [
+        "==",
+        "class",
+        "trunk"
+      ],
+      "layout": {
+        "line-cap": "round",
+        "line-join": "round"
+      },
       "paint": {
         "line-color": "#2a2a00",
-        "line-width": { "stops": [[10, 3], [14, 10], [18, 20]] }
+        "line-width": {
+          "stops": [
+            [
+              10,
+              3
+            ],
+            [
+              14,
+              10
+            ],
+            [
+              18,
+              20
+            ]
+          ]
+        }
       }
     },
     {
@@ -79,11 +155,33 @@
       "type": "line",
       "source": "osm",
       "source-layer": "transportation",
-      "filter": ["==", "class", "primary"],
-      "layout": { "line-cap": "round", "line-join": "round" },
+      "filter": [
+        "==",
+        "class",
+        "primary"
+      ],
+      "layout": {
+        "line-cap": "round",
+        "line-join": "round"
+      },
       "paint": {
         "line-color": "#222222",
-        "line-width": { "stops": [[10, 2.5], [14, 8], [18, 16]] }
+        "line-width": {
+          "stops": [
+            [
+              10,
+              2.5
+            ],
+            [
+              14,
+              8
+            ],
+            [
+              18,
+              16
+            ]
+          ]
+        }
       }
     },
     {
@@ -91,11 +189,33 @@
       "type": "line",
       "source": "osm",
       "source-layer": "transportation",
-      "filter": ["==", "class", "motorway"],
-      "layout": { "line-cap": "round", "line-join": "round" },
+      "filter": [
+        "==",
+        "class",
+        "motorway"
+      ],
+      "layout": {
+        "line-cap": "round",
+        "line-join": "round"
+      },
       "paint": {
         "line-color": "#FFD700",
-        "line-width": { "stops": [[10, 2], [14, 6], [18, 14]] }
+        "line-width": {
+          "stops": [
+            [
+              10,
+              2
+            ],
+            [
+              14,
+              6
+            ],
+            [
+              18,
+              14
+            ]
+          ]
+        }
       }
     },
     {
@@ -103,11 +223,33 @@
       "type": "line",
       "source": "osm",
       "source-layer": "transportation",
-      "filter": ["==", "class", "trunk"],
-      "layout": { "line-cap": "round", "line-join": "round" },
+      "filter": [
+        "==",
+        "class",
+        "trunk"
+      ],
+      "layout": {
+        "line-cap": "round",
+        "line-join": "round"
+      },
       "paint": {
         "line-color": "#FFA500",
-        "line-width": { "stops": [[10, 1.5], [14, 5], [18, 12]] }
+        "line-width": {
+          "stops": [
+            [
+              10,
+              1.5
+            ],
+            [
+              14,
+              5
+            ],
+            [
+              18,
+              12
+            ]
+          ]
+        }
       }
     },
     {
@@ -115,11 +257,33 @@
       "type": "line",
       "source": "osm",
       "source-layer": "transportation",
-      "filter": ["==", "class", "primary"],
-      "layout": { "line-cap": "round", "line-join": "round" },
+      "filter": [
+        "==",
+        "class",
+        "primary"
+      ],
+      "layout": {
+        "line-cap": "round",
+        "line-join": "round"
+      },
       "paint": {
         "line-color": "#FFFFFF",
-        "line-width": { "stops": [[10, 1.2], [14, 4], [18, 10]] }
+        "line-width": {
+          "stops": [
+            [
+              10,
+              1.2
+            ],
+            [
+              14,
+              4
+            ],
+            [
+              18,
+              10
+            ]
+          ]
+        }
       }
     },
     {
@@ -127,11 +291,33 @@
       "type": "line",
       "source": "osm",
       "source-layer": "transportation",
-      "filter": ["==", "class", "secondary"],
-      "layout": { "line-cap": "round", "line-join": "round" },
+      "filter": [
+        "==",
+        "class",
+        "secondary"
+      ],
+      "layout": {
+        "line-cap": "round",
+        "line-join": "round"
+      },
       "paint": {
         "line-color": "#AAAAAA",
-        "line-width": { "stops": [[10, 0.8], [14, 3], [18, 8]] }
+        "line-width": {
+          "stops": [
+            [
+              10,
+              0.8
+            ],
+            [
+              14,
+              3
+            ],
+            [
+              18,
+              8
+            ]
+          ]
+        }
       }
     },
     {
@@ -139,11 +325,33 @@
       "type": "line",
       "source": "osm",
       "source-layer": "transportation",
-      "filter": ["==", "class", "tertiary"],
-      "layout": { "line-cap": "round", "line-join": "round" },
+      "filter": [
+        "==",
+        "class",
+        "tertiary"
+      ],
+      "layout": {
+        "line-cap": "round",
+        "line-join": "round"
+      },
       "paint": {
         "line-color": "#666666",
-        "line-width": { "stops": [[12, 0.6], [14, 2], [18, 6]] }
+        "line-width": {
+          "stops": [
+            [
+              12,
+              0.6
+            ],
+            [
+              14,
+              2
+            ],
+            [
+              18,
+              6
+            ]
+          ]
+        }
       }
     },
     {
@@ -151,11 +359,36 @@
       "type": "line",
       "source": "osm",
       "source-layer": "transportation",
-      "filter": ["in", "class", "minor", "service", "residential", "unclassified"],
-      "layout": { "line-cap": "round", "line-join": "round" },
+      "filter": [
+        "in",
+        "class",
+        "minor",
+        "service",
+        "residential",
+        "unclassified"
+      ],
+      "layout": {
+        "line-cap": "round",
+        "line-join": "round"
+      },
       "paint": {
         "line-color": "#444444",
-        "line-width": { "stops": [[12, 0.4], [14, 1.5], [18, 4]] }
+        "line-width": {
+          "stops": [
+            [
+              12,
+              0.4
+            ],
+            [
+              14,
+              1.5
+            ],
+            [
+              18,
+              4
+            ]
+          ]
+        }
       }
     },
     {
@@ -163,12 +396,32 @@
       "type": "symbol",
       "source": "osm",
       "source-layer": "transportation_name",
-      "filter": ["in", "class", "motorway", "trunk", "primary", "secondary"],
+      "filter": [
+        "in",
+        "class",
+        "motorway",
+        "trunk",
+        "primary",
+        "secondary"
+      ],
       "layout": {
         "symbol-placement": "line",
         "text-field": "{name:latin}",
-        "text-size": { "stops": [[14, 10], [18, 14]] },
-        "text-font": ["Noto Sans Regular"]
+        "text-size": {
+          "stops": [
+            [
+              14,
+              10
+            ],
+            [
+              18,
+              14
+            ]
+          ]
+        },
+        "text-font": [
+          "Noto Sans Regular"
+        ]
       },
       "paint": {
         "text-color": "#999999",

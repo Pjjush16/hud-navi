@@ -378,7 +378,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 maplibreStyleLoaded = true
 
                 // 初始相机位置：模拟驾驶员视角
-                // Pitch -15° → MapLibre tilt = 75° (从正上方 0° 算起)
+                // MapLibre 最大 tilt 60°（硬限制），这是最接近驾驶员视角的最大倾角
                 // Z 轴 3m 眼高 → zoom ≈ 19.5（基准值，动态缩放由此加减）
                 // FOV 50° 通过 zoom 间接模拟
                 map.cameraPosition = CameraPosition.Builder()
@@ -1300,7 +1300,10 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
     // === MapLibre 相机更新（每帧调用） ===
     // 摄像机参数：Z=3m眼高, Pitch=-15°, FOV=50°
-    private val HUD_TILT = 75.0   // MapLibre tilt: 0=俯视, 90=水平. 75° ≈ pitch -15°
+    // 摄像机参数：Z=3m眼高, Pitch=-15°, FOV=50°
+    // MapLibre Native 最大 tilt 60°（硬限制），60° ≈ pitch -30°（从水平面算）
+    // 这是最接近驾驶员视角的最大倾角
+    private val HUD_TILT = 60.0
 
     private fun updateMapLibreCamera() {
         if (!maplibreStyleLoaded || vehicleLat == 0.0) return
