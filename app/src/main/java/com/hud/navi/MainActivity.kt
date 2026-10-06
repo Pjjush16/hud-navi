@@ -66,8 +66,10 @@ import org.maplibre.android.style.layers.LineLayer
 import org.maplibre.android.style.layers.Property
 import org.maplibre.android.style.layers.PropertyFactory.*
 import org.maplibre.android.style.sources.GeoJsonSource
-import com.google.gson.JsonArray
-import com.google.gson.JsonObject
+import org.maplibre.geojson.Feature
+import org.maplibre.geojson.FeatureCollection
+import org.maplibre.geojson.LineString
+import org.maplibre.geojson.Point
 
 /**
  * HUD 导航 v9.0 — 回滚地图绘制到气压计之前
@@ -396,10 +398,8 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 map.uiSettings.isTiltGesturesEnabled = false
 
                 // 添加导航路线 GeoJSON Source（空初始）
-                style.addSource(GeoJsonSource("navigation-route", JsonObject().apply {
-                    addProperty("type", "FeatureCollection")
-                    add("features", JsonArray())
-                }))
+                val emptyCollection = FeatureCollection.fromFeatures(emptyList())
+                style.addSource(GeoJsonSource("navigation-route", emptyCollection))
 
                 // 导航路线图层：深蓝轮廓 + 亮蓝路线
                 style.addLayer(LineLayer("route-outline", "navigation-route").withProperties(
@@ -1327,27 +1327,10 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private fun updateMapLibreRoute(route: List<Pair<Double, Double>>) {
         if (!maplibreStyleLoaded || route.isEmpty()) return
 
-        val coordinates = JsonArray()
-        for ((lat, lng) in route) {
-            val coord = JsonArray()
-            coord.add(lng)  // GeoJSON: [lng, lat]
-            coord.add(lat)
-            coordinates.add(coord)
-        }
-
-        val feature = JsonObject()
-        feature.addProperty("type", "Feature")
-        feature.add("properties", JsonObject())
-        val geometry = JsonObject()
-        geometry.addProperty("type", "LineString")
-        geometry.add("coordinates", coordinates)
-        feature.add("geometry", geometry)
-
-        val featureCollection = JsonObject()
-        featureCollection.addProperty("type", "FeatureCollection")
-        val features = JsonArray()
-        features.add(feature)
-        featureCollection.add("features", features)
+        val points = route.map { (lat, lng) -> Point.fromLngLat(lng, lat) }
+        val lineString = LineString.fromLngLats(points)
+        val feature = Feature.fromGeometry(lineString)
+        val featureCollection = FeatureCollection.fromFeatures(listOf(feature))
 
         mapView.getMapAsync { map ->
             map.style?.getSourceAs<GeoJsonSource>("navigation-route")?.setGeoJson(featureCollection)
