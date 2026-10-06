@@ -157,27 +157,40 @@ class IntentClassifier(
         // 无需释放（HTTP 调用无状态）
     }
 
-    // ==================== 联网搜索工具定义 ====================
+    // Function Calling 工具执行回调（ChatEngine 注册此回调以触发 UI 操作）
+    var onToolCall: ((toolName: String, args: Map<String, Any>) -> String)? = null
 
-    /**
-     * Function Calling 工具定义：web_search
-     * 告诉模型：你可以调用这个工具搜索互联网获取实时信息
-     */
-    private fun buildWebSearchTool(): JSONObject {
+    // ==================== Function Calling 工具定义 ====================
+
+    private fun simpleTool(name: String, description: String): JSONObject {
         return JSONObject().apply {
             put("type", "function")
             put("function", JSONObject().apply {
-                put("name", "web_search")
-                put("description", "在互联网上搜索实时信息。当用户询问当前天气、新闻、股票价格、体育赛事结果、最新事件、或任何需要实时数据的问题时，调用此工具获取最新信息后再回答。")
+                put("name", name)
+                put("description", description)
+                put("parameters", JSONObject().apply {
+                    put("type", "object")
+                    put("properties", JSONObject())
+                })
+            })
+        }
+    }
+
+    private fun stringParamTool(name: String, description: String, paramName: String, paramDesc: String, required: Boolean = true): JSONObject {
+        return JSONObject().apply {
+            put("type", "function")
+            put("function", JSONObject().apply {
+                put("name", name)
+                put("description", description)
                 put("parameters", JSONObject().apply {
                     put("type", "object")
                     put("properties", JSONObject().apply {
-                        put("query", JSONObject().apply {
+                        put(paramName, JSONObject().apply {
                             put("type", "string")
-                            put("description", "搜索关键词，简洁准确，中文优先")
+                            put("description", paramDesc)
                         })
                     })
-                    put("required", JSONArray().apply { put("query") })
+                    if (required) put("required", JSONArray().apply { put(paramName) })
                 })
             })
         }
@@ -185,7 +198,38 @@ class IntentClassifier(
 
     private fun buildTools(): JSONArray {
         return JSONArray().apply {
-            put(buildWebSearchTool())
+            // 联网搜索
+            put(stringParamTool("web_search",
+                "在互联网上搜索实时信息。当用户询问天气、新闻、股票、赛事、最新事件等需要实时数据的问题时调用。",
+                "query", "搜索关键词，简洁准确，中文优先"))
+
+            // 导航
+            put(stringParamTool("navigate_to",
+                "开始导航到指定地点。先用此工具查询地点坐标，然后开始导航。",
+                "destination", "目的地名称，例如\"天安门\"、\"最近的加油站\""))
+            put(simpleTool("cancel_navigation",
+                "取消当前导航。当用户说\"取消导航\"、\"停止导航\"、\"不导航了\"时调用。"))
+            put(simpleTool("get_navigation_status",
+                "获取当前导航状态：是否正在导航、目的地、剩余距离和时间。"))
+
+            // 地图缩放
+            put(simpleTool("map_zoom_in", "放大地图/拉近视角。当用户说\"放大\"、\"拉近\"、\"放大地图\"时调用。"))
+            put(simpleTool("map_zoom_out", "缩小地图/拉远视角。当用户说\"缩小\"、\"拉远\"、\"缩小地图\"时调用。"))
+            put(simpleTool("map_zoom_reset", "重置地图缩放到默认级别。当用户说\"恢复缩放\"、\"重置缩放\"时调用。"))
+
+            // HUD 镜像
+            put(simpleTool("mirror_on", "开启HUD镜像翻转（挡风玻璃投影模式）。"))
+            put(simpleTool("mirror_off", "关闭HUD镜像翻转。"))
+            put(simpleTool("mirror_toggle", "切换HUD镜像状态（开→关 或 关→开）。"))
+
+            // 车辆状态
+            put(simpleTool("get_current_speed", "获取当前车速（km/h）和GPS定位信息。"))
+
+            // 音乐
+            put(stringParamTool("play_music", "播放音乐。", "query", "歌曲名或歌手名，留空则播放/恢复播放", required = false))
+            put(simpleTool("pause_music", "暂停当前播放的音乐。"))
+            put(simpleTool("next_track", "跳到下一首歌曲。"))
+            put(simpleTool("prev_track", "跳到上一首歌曲。"))
         }
     }
 
@@ -203,7 +247,17 @@ class IntentClassifier(
         val messages = JSONArray().apply {
             put(JSONObject().apply {
                 put("role", "system")
-                put("content", "你是车载语音助手\"哈德\"。用简短、自然、口语化的方式回答用户。如果用户的问题需要实时信息（天气、新闻、股票、赛事、最新事件等），调用web_search工具获取最新数据后再回答。回答要简洁，适合语音播报，控制在3-5句话以内。")
+                put("content", """你是车载语音助手"哈德"。用简短、自然、口语化的方式回答用户。
+你可以调用以下工具来帮助用户：
+- web_search: 搜索互联网实时信息（天气、新闻、股票等）
+- navigate_to: 开始导航到指定地点
+- cancel_navigation: 取消当前导航
+- get_navigation_status: 获取当前导航状态
+- map_zoom_in/out/reset: 放大/缩小/重置地图缩放
+- mirror_on/off/toggle: 开启/关闭/切换HUD镜像
+- get_current_speed: 获取当前车速
+- play_music/pause_music/next_track/prev_track: 音乐播放控制
+回答要简洁，适合语音播报，控制在3-5句话以内。如果用户的请求需要操作车辆功能，调用对应工具后告知用户操作结果。""".trimIndent())
             })
             put(JSONObject().apply {
                 put("role", "user")
@@ -211,11 +265,11 @@ class IntentClassifier(
             })
         }
 
-        val tools = if (webSearchClient != null) buildTools() else null
+        val tools = buildTools()
 
         // 第一轮：带工具发送
-        val firstResponse = callApiRaw(messages, tools) ?: return null
-        val firstMessage = firstResponse.optJSONObject("message") ?: return null
+        // callApiRaw 返回的就是 message 对象（choices[0].message）
+        val firstMessage = callApiRaw(messages, tools) ?: return null
         val toolCalls = firstMessage.optJSONArray("tool_calls")
 
         // 模型没有调用工具 → 直接返回文本
@@ -225,9 +279,10 @@ class IntentClassifier(
 
         // 模型调用了工具 → 执行工具 → 第二轮
         // 先把 assistant 的 tool_calls 消息加入历史
+        // 注意：content 可能为 null（当 finish_reason 为 tool_calls 时）
         messages.put(JSONObject().apply {
             put("role", "assistant")
-            put("content", firstMessage.opt("content"))
+            put("content", firstMessage.optString("content", ""))
             put("tool_calls", toolCalls)
         })
 
@@ -240,6 +295,20 @@ class IntentClassifier(
 
             val resultJson = when (funcName) {
                 "web_search" -> executeWebSearch(funcArgs)
+                "navigate_to" -> executeToolWithCallback(funcName, funcArgs)
+                "cancel_navigation" -> executeToolWithCallback(funcName, funcArgs)
+                "get_navigation_status" -> executeToolWithCallback(funcName, funcArgs)
+                "map_zoom_in" -> executeToolWithCallback(funcName, funcArgs)
+                "map_zoom_out" -> executeToolWithCallback(funcName, funcArgs)
+                "map_zoom_reset" -> executeToolWithCallback(funcName, funcArgs)
+                "mirror_on" -> executeToolWithCallback(funcName, funcArgs)
+                "mirror_off" -> executeToolWithCallback(funcName, funcArgs)
+                "mirror_toggle" -> executeToolWithCallback(funcName, funcArgs)
+                "get_current_speed" -> executeToolWithCallback(funcName, funcArgs)
+                "play_music" -> executeToolWithCallback(funcName, funcArgs)
+                "pause_music" -> executeToolWithCallback(funcName, funcArgs)
+                "next_track" -> executeToolWithCallback(funcName, funcArgs)
+                "prev_track" -> executeToolWithCallback(funcName, funcArgs)
                 else -> """{"error":"未知工具: $funcName"}"""
             }
 
@@ -251,8 +320,7 @@ class IntentClassifier(
         }
 
         // 第二轮：带工具结果，获取最终回复
-        val finalResponse = callApiRaw(messages, tools) ?: return null
-        val finalMessage = finalResponse.optJSONObject("message") ?: return null
+        val finalMessage = callApiRaw(messages, tools) ?: return null
         return finalMessage.optString("content", "")
     }
 
@@ -289,6 +357,40 @@ class IntentClassifier(
         }
     }
 
+    /**
+     * 执行本地工具调用（通过 onToolCall 回调触发 UI 操作）
+     *
+     * 所有 HUD 控制工具（导航、缩放、镜像、音乐、速度）都通过此函数执行。
+     * ChatEngine 注册 onToolCall 回调来处理实际的 UI 操作。
+     *
+     * @param toolName 工具名称
+     * @param argsJson 参数 JSON 字符串
+     * @return 执行结果 JSON（返回给 API 第二轮）
+     */
+    private fun executeToolWithCallback(toolName: String, argsJson: String): String {
+        try {
+            val args = try {
+                val json = JSONObject(argsJson)
+                val map = mutableMapOf<String, Any>()
+                json.keys().forEach { key -> map[key] = json.get(key) }
+                map
+            } catch (e: Exception) {
+                emptyMap<String, Any>()
+            }
+
+            Log.i(TAG, "Tool call: $toolName(${args})")
+
+            // 通过回调执行实际操作（ChatEngine 处理 UI 变更）
+            val result = onToolCall?.invoke(toolName, args)
+                ?: """{"status":"ok","tool":"$toolName","message":"已执行"}"""
+
+            return result
+        } catch (e: Exception) {
+            Log.e(TAG, "Tool $toolName failed: ${e.message}")
+            return """{"error":"工具执行失败: ${e.message}"}"""
+        }
+    }
+
     // ==================== 智谱 API 调用 ====================
 
     private fun classifyWithApi(userText: String): IntentResult? {
@@ -303,8 +405,10 @@ class IntentClassifier(
                 put("content", prompt)
             })
         }
-        val response = callApiRaw(messages, null, jsonMode = true) ?: return null
-        val content = response.optJSONObject("message")?.optString("content", "") ?: return null
+        // callApiRaw 返回的就是 message 对象（choices[0].message）
+        val message = callApiRaw(messages, null, jsonMode = true) ?: return null
+        val content = message.optString("content", "")
+        if (content.isBlank()) return null
         return parseResponse(content)
     }
 
@@ -328,17 +432,37 @@ class IntentClassifier(
         conn.setRequestProperty("Content-Type", "application/json")
         conn.setRequestProperty("Authorization", "Bearer $apiKey")
 
+        val model = modelId.ifBlank { "glm-4.7-flash" }
+
         val body = JSONObject().apply {
-            put("model", modelId.ifBlank { "glm-4.7-flash" })
+            put("model", model)
             put("messages", messages)
-            put("temperature", if (jsonMode) 0.1 else 0.7)
             put("max_tokens", if (jsonMode) 256 else 512)
             put("stream", false)
+
+            // 智谱 GLM 系列模型需要 thinking 参数
+            // GLM-5.3 强制要求 thinking.type="enabled"
+            // GLM-4.7 默认强制思考，但显式传更稳妥
+            // jsonMode（意图分类）用 low 减少延迟，聊天用 max
+            val isGlm5 = model.contains("5") || model.contains("glm-5")
+            if (isGlm5 || model.contains("glm-4.7") || model.contains("4.7")) {
+                put("thinking", JSONObject().apply {
+                    put("type", "enabled")
+                })
+                put("reasoning_effort", if (jsonMode) "low" else "max")
+            }
+
+            // temperature: 智谱 GLM-5.x 默认 1.0，jsonMode 用低温度稳定输出
+            // 注意：GLM-5.x 开了 thinking 后 temperature 对思考过程无效，只影响最终输出
+            put("temperature", if (jsonMode) 0.1 else 0.7)
+
             if (tools != null && tools.length() > 0) {
                 put("tools", tools)
                 put("tool_choice", "auto")
             }
         }
+
+        Log.d(TAG, "API request: model=$model, tools=${tools?.length() ?: 0}, jsonMode=$jsonMode")
 
         OutputStreamWriter(conn.outputStream, "UTF-8").use { writer ->
             writer.write(body.toString())
@@ -350,7 +474,7 @@ class IntentClassifier(
             val errorBody = try {
                 BufferedReader(InputStreamReader(conn.errorStream, "UTF-8")).use { it.readText() }
             } catch (e: Exception) { "" }
-            Log.w(TAG, "API returned $responseCode: $errorBody")
+            Log.w(TAG, "API returned $responseCode: ${errorBody.take(300)}")
             conn.disconnect()
             return null
         }
@@ -358,6 +482,22 @@ class IntentClassifier(
         val responseBody = BufferedReader(InputStreamReader(conn.inputStream, "UTF-8")).use { it.readText() }
         conn.disconnect()
 
+        // 解析智谱 API 响应
+        // 响应格式（OpenAI 兼容）：
+        // {
+        //   "id": "...",
+        //   "choices": [{
+        //     "index": 0,
+        //     "message": {
+        //       "role": "assistant",
+        //       "content": "回复内容（可能为 null）",
+        //       "reasoning_content": "思考过程（GLM-4.7/5.x 开启思考时存在）",
+        //       "tool_calls": [{"id": "...", "type": "function", "function": {"name": "...", "arguments": "..."}}]
+        //     },
+        //     "finish_reason": "stop" | "length" | "tool_calls" | "sensitive"
+        //   }],
+        //   "usage": {"prompt_tokens": N, "completion_tokens": N, "total_tokens": N}
+        // }
         val json = JSONObject(responseBody)
         val choices = json.optJSONArray("choices") ?: return null
         if (choices.length() == 0) return null
@@ -365,7 +505,18 @@ class IntentClassifier(
         val finishReason = choice.optString("finish_reason", "")
         val message = choice.optJSONObject("message") ?: return null
 
-        Log.d(TAG, "API finish_reason=$finishReason, tool_calls=${message.optJSONArray("tool_calls")?.length() ?: 0}, content=${message.optString("content", "").take(80)}...")
+        // 日志记录（区分 reasoning_content 和 content）
+        val reasoningContent = message.optString("reasoning_content", "")
+        val content = message.optString("content", "")
+        val toolCalls = message.optJSONArray("tool_calls")
+        val usage = json.optJSONObject("usage")
+
+        Log.d(TAG, "API response: finish=$finishReason, " +
+                "tool_calls=${toolCalls?.length() ?: 0}, " +
+                "content=${content.take(80)}" +
+                if (reasoningContent.isNotBlank()) ", reasoning=${reasoningContent.take(50)}..." else "" +
+                if (usage != null) ", tokens=${usage.optInt("total_tokens", 0)}" else "")
+
         return message
     }
 

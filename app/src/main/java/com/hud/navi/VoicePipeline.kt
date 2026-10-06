@@ -117,6 +117,10 @@ class VoicePipeline(
         try {
             chatEngine = ChatEngine(context, intentClassifier!!, webSearchClient!!, osrmRouter, apiServer)
             chatEngine?.init()
+            // 注册工具 UI 回调：Function Calling 工具触发时，转发到 VoicePipeline 的 onUiCommand
+            chatEngine?.toolUiCallback = { command ->
+                handler.post { callback.onUiCommand(command) }
+            }
         } catch (e: Exception) {
             errors.add("聊天引擎: ${e.message}")
         }

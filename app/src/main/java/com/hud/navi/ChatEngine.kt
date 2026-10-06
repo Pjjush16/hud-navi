@@ -36,15 +36,134 @@ class ChatEngine(
     var currentRoute: RouteResult? = null
         private set
 
+    // Function Calling 工具执行的 UI 回调（由 MainActivity 设置）
+    var toolUiCallback: ((String) -> Unit)? = null
+
     /**
-     * 初始化 TTS 引擎
+     * 初始化 TTS 引擎 + 注册 Function Calling 工具回调
      */
     fun init() {
+        // 注册工具回调：当 AI 模型调用工具时，ChatEngine 执行实际操作
+        intentClassifier.onToolCall = { toolName, args ->
+            handleToolCall(toolName, args)
+        }
+
         try {
             tts = TextToSpeech(context, this)
             Log.i(TAG, "TTS engine initializing...")
         } catch (e: Exception) {
             Log.e(TAG, "TTS init failed: ${e.message}", e)
+        }
+    }
+
+    /**
+     * 处理 Function Calling 工具调用
+     * 由 IntentClassifier 的 onToolCall 回调触发
+     *
+     * @return JSON 字符串，返回给 API 作为工具执行结果
+     */
+    private fun handleToolCall(toolName: String, args: Map<String, Any>): String {
+        Log.i(TAG, "Handling tool call: $toolName($args)")
+
+        return when (toolName) {
+            // === 导航 ===
+            "navigate_to" -> {
+                val destination = args["destination"] as? String ?: ""
+                if (destination.isBlank()) {
+                    """{"error":"缺少目的地参数"}"""
+                } else {
+                    // 异步启动导航，立即返回状态
+                    val intent = IntentResult(
+                        IntentResult.INTENT_NAVIGATION, "navigate_to",
+                        mapOf("destination" to destination), toolName, destination
+                    )
+                    handleNavigation(intent, toolUiCallback)
+                    """{"status":"navigating","destination":"$destination"}"""
+                }
+            }
+            "cancel_navigation" -> {
+                currentDestination = null
+                currentRoute = null
+                speak("已取消导航")
+                toolUiCallback?.invoke("NAVIGATION_CANCEL")
+                """{"status":"cancelled","message":"导航已取消"}"""
+            }
+            "get_navigation_status" -> {
+                val dest = currentDestination ?: "无"
+                val route = currentRoute
+                val dist = if (route != null) "${(route.distance / 1000).toInt()}公里" else "无"
+                val dur = if (route != null) "${(route.duration / 60).toInt()}分钟" else "无"
+                """{"navigating":${currentDestination != null},"destination":"$dest","distance":"$dist","eta":"$dur"}"""
+            }
+
+            // === 地图缩放 ===
+            "map_zoom_in" -> {
+                toolUiCallback?.invoke("MAP_ZOOM_IN")
+                speak("已放大地图")
+                """{"status":"ok","action":"zoom_in","message":"地图已放大"}"""
+            }
+            "map_zoom_out" -> {
+                toolUiCallback?.invoke("MAP_ZOOM_OUT")
+                speak("已缩小地图")
+                """{"status":"ok","action":"zoom_out","message":"地图已缩小"}"""
+            }
+            "map_zoom_reset" -> {
+                toolUiCallback?.invoke("MAP_ZOOM_RESET")
+                speak("已恢复默认缩放")
+                """{"status":"ok","action":"zoom_reset","message":"缩放已重置"}"""
+            }
+
+            // === HUD 镜像 ===
+            "mirror_on" -> {
+                toolUiCallback?.invoke("MIRROR_ON")
+                speak("已开启镜像")
+                """{"status":"ok","action":"mirror_on","message":"HUD镜像已开启"}"""
+            }
+            "mirror_off" -> {
+                toolUiCallback?.invoke("MIRROR_OFF")
+                speak("已关闭镜像")
+                """{"status":"ok","action":"mirror_off","message":"HUD镜像已关闭"}"""
+            }
+            "mirror_toggle" -> {
+                toolUiCallback?.invoke("MIRROR_TOGGLE")
+                speak("已切换镜像")
+                """{"status":"ok","action":"mirror_toggle","message":"HUD镜像已切换"}"""
+            }
+
+            // === 车辆状态 ===
+            "get_current_speed" -> {
+                val location = intentClassifier.currentLocation
+                val lat = location?.first ?: 0.0
+                val lng = location?.second ?: 0.0
+                // 速度由 MainActivity 通过 toolUiCallback 传入
+                toolUiCallback?.invoke("GET_SPEED")
+                """{"lat":$lat,"lng":$lng,"message":"当前定位已获取"}"""
+            }
+
+            // === 音乐 ===
+            "play_music" -> {
+                val query = args["query"] as? String ?: ""
+                toolUiCallback?.invoke("MUSIC_PLAY|$query")
+                speak(if (query.isNotBlank()) "正在播放$query" else "正在播放音乐")
+                """{"status":"ok","action":"play","query":"$query"}"""
+            }
+            "pause_music" -> {
+                toolUiCallback?.invoke("MUSIC_PAUSE")
+                speak("已暂停")
+                """{"status":"ok","action":"pause"}"""
+            }
+            "next_track" -> {
+                toolUiCallback?.invoke("MUSIC_NEXT")
+                speak("下一首")
+                """{"status":"ok","action":"next"}"""
+            }
+            "prev_track" -> {
+                toolUiCallback?.invoke("MUSIC_PREV")
+                speak("上一首")
+                """{"status":"ok","action":"previous"}"""
+            }
+
+            else -> """{"error":"未知工具: $toolName"}"""
         }
     }
 
