@@ -64,6 +64,7 @@ import org.maplibre.android.maps.MapView
 import org.maplibre.android.maps.Style
 import org.maplibre.android.style.layers.LineLayer
 import org.maplibre.android.style.layers.Property
+import org.maplibre.android.style.layers.PropertyFactory.*
 import org.maplibre.android.style.sources.GeoJsonSource
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
@@ -401,22 +402,18 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 }))
 
                 // 导航路线图层：深蓝轮廓 + 亮蓝路线
-                style.addLayer(LineLayer("route-outline", "navigation-route").apply {
-                    setProperties(
-                        Property.LINE_CAP, Property.LINE_CAP_ROUND,
-                        Property.LINE_JOIN, Property.LINE_JOIN_ROUND
-                    )
-                    lineWidth = 8f
-                    lineColor = "#003366"
-                })
-                style.addLayerAbove(LineLayer("route-line", "navigation-route").apply {
-                    setProperties(
-                        Property.LINE_CAP, Property.LINE_CAP_ROUND,
-                        Property.LINE_JOIN, Property.LINE_JOIN_ROUND
-                    )
-                    lineWidth = 4f
-                    lineColor = "#00BFFF"
-                }, "route-outline")
+                style.addLayer(LineLayer("route-outline", "navigation-route").withProperties(
+                    lineCap(Property.LINE_CAP_ROUND),
+                    lineJoin(Property.LINE_JOIN_ROUND),
+                    lineWidth(8f),
+                    lineColor("#003366")
+                ))
+                style.addLayerAbove(LineLayer("route-line", "navigation-route").withProperties(
+                    lineCap(Property.LINE_CAP_ROUND),
+                    lineJoin(Property.LINE_JOIN_ROUND),
+                    lineWidth(4f),
+                    lineColor("#00BFFF")
+                ), "route-outline")
 
                 Log.i(TAG, "MapLibre style loaded (HUD dark, tilt=75° pitch=-15°, z=3m, FOV≈50°)")
             }
