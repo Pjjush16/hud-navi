@@ -32,7 +32,7 @@ class OnnxWakeWordEngine(
         private const val MEL_FRAMES_FOR_EMBEDDING = 76
         private const val N_EMBEDDINGS_FOR_CLASSIFIER = 16
         private const val EMBEDDING_DIM = 96
-        private const val WAKE_THRESHOLD = 0.5f
+        private const val WAKE_THRESHOLD = 0.2f  // v4: lowered from 0.5 to handle diverse voice patterns
         private const val COOLDOWN_MS = 1500L
 
         private const val ASSET_DIR = "wakeword"
