@@ -489,6 +489,18 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 hudView.mirrorEnabled = false
                 updateWakeFeedbackMirror()
             }
+            command == "MAP_ZOOM_IN" -> {
+                hudView.zoomOffset = (hudView.zoomOffset + 1.0f).coerceAtMost(3.0f)
+                hudView.invalidate()
+            }
+            command == "MAP_ZOOM_OUT" -> {
+                hudView.zoomOffset = (hudView.zoomOffset - 1.0f).coerceAtLeast(-3.0f)
+                hudView.invalidate()
+            }
+            command == "MAP_ZOOM_RESET" -> {
+                hudView.zoomOffset = 0f
+                hudView.invalidate()
+            }
             command.startsWith("🔍") -> {
                 wakeFeedbackKeyword.text = command
             }

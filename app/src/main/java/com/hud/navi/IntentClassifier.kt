@@ -60,11 +60,14 @@ class IntentClassifier(
         private val SYSTEM_PROMPT = """
 你是车载语音助手"哈德"。识别用户意图，仅输出JSON，不要其他文字。
 格式：{"intent":"类型","action":"动作","params":{参数}}
-类型：navigation(导航/找地点), search(搜索/查资料), hud_control(HUD设置/镜像), music(音乐/播放), chat(闲聊/问答)
+类型：navigation(导航/找地点), search(搜索/查资料), hud_control(HUD设置/镜像/地图缩放), music(音乐/播放), chat(闲聊/问答)
 示例：
 "导航去加油站"→{"intent":"navigation","action":"search_poi","params":{"keyword":"加油站","sort":"nearest"}}
 "搜一下明天天气"→{"intent":"search","action":"web_search","params":{"query":"明天天气"}}
 "关镜像"→{"intent":"hud_control","action":"mirror_off","params":{}}
+"放大地图"→{"intent":"hud_control","action":"map_zoom_in","params":{}}
+"缩小地图"→{"intent":"hud_control","action":"map_zoom_out","params":{}}
+"重置缩放"→{"intent":"hud_control","action":"map_zoom_reset","params":{}}
 "播放音乐"→{"intent":"music","action":"play","params":{}}
 "你好"→{"intent":"chat","action":"reply","params":{"text":"你好，我是哈德，有什么可以帮你的？"}}
         """.trimIndent()
@@ -77,6 +80,12 @@ class IntentClassifier(
         private val MIRROR_ON = listOf("开镜像", "打开镜像", "镜像开", "翻转", "打开翻转")
         private val MIRROR_OFF = listOf("关镜像", "关闭镜像", "镜像关", "镜像关闭", "关翻转")
         private val MIRROR_TOGGLE = listOf("切换镜像", "镜像切换", "翻转切换")
+
+        // 地图缩放
+        private val MAP_ZOOM_IN = listOf("放大地图", "放大", "拉近", "地图放大", "放大一点", "再放大")
+        private val MAP_ZOOM_OUT = listOf("缩小地图", "缩小", "拉远", "地图缩小", "缩小一点", "再缩小")
+        private val MAP_ZOOM_RESET = listOf("重置缩放", "恢复缩放", "缩放恢复", "默认缩放")
+
         private val MUSIC_PLAY = listOf("播放", "放歌", "放音乐", "来首歌", "听歌")
         private val MUSIC_PAUSE = listOf("暂停", "停一下", "停止播放")
         private val MUSIC_NEXT = listOf("下一首", "换一首", "跳过")
@@ -424,6 +433,14 @@ class IntentClassifier(
             return IntentResult(IntentResult.INTENT_HUD_CONTROL, "mirror_on", emptyMap(), userText)
         if (MIRROR_TOGGLE.any { text.contains(it) })
             return IntentResult(IntentResult.INTENT_HUD_CONTROL, "mirror_toggle", emptyMap(), userText)
+
+        // 地图缩放
+        if (MAP_ZOOM_RESET.any { text.contains(it) })
+            return IntentResult(IntentResult.INTENT_HUD_CONTROL, "map_zoom_reset", emptyMap(), userText)
+        if (MAP_ZOOM_IN.any { text.contains(it) })
+            return IntentResult(IntentResult.INTENT_HUD_CONTROL, "map_zoom_in", emptyMap(), userText)
+        if (MAP_ZOOM_OUT.any { text.contains(it) })
+            return IntentResult(IntentResult.INTENT_HUD_CONTROL, "map_zoom_out", emptyMap(), userText)
 
         // 导航
         if (NAV_KEYWORDS.any { text.contains(it) }) {

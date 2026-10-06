@@ -66,10 +66,14 @@ class HudView @JvmOverloads constructor(
     var mapCenterLat: Double = 0.0
     var mapCenterLng: Double = 0.0
 
+    // === 手动缩放偏移（语音控制：放大/缩小地图） ===
+    var zoomOffset: Float = 0f  // -3.0 ~ +3.0，0 = 自动
+
     // === 速度制动态缩放 ===
     private fun getDynamicZoom(speedKmh: Float): Float {
         val clamped = speedKmh.coerceIn(0f, 150f)
-        return 18f - (clamped / 150f) * 3f
+        val base = 18f - (clamped / 150f) * 3f
+        return (base + zoomOffset).coerceIn(13f, 21f)
     }
 
     // === 画笔 ===

@@ -183,6 +183,18 @@ class ChatEngine(
                 speak("好的，已关闭镜像")
                 callback?.invoke("MIRROR_OFF")
             }
+            "map_zoom_in" -> {
+                speak("已放大地图")
+                callback?.invoke("MAP_ZOOM_IN")
+            }
+            "map_zoom_out" -> {
+                speak("已缩小地图")
+                callback?.invoke("MAP_ZOOM_OUT")
+            }
+            "map_zoom_reset" -> {
+                speak("已恢复默认缩放")
+                callback?.invoke("MAP_ZOOM_RESET")
+            }
             "brightness_up" -> {
                 speak("好的，已提高亮度")
                 callback?.invoke("BRIGHTNESS_UP")
