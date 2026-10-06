@@ -85,19 +85,12 @@ class HudView @JvmOverloads constructor(
             return
         }
 
-        // HUD 镜像：垂直翻转整个画面
-        if (mirrorEnabled) {
-            canvas.save()
-            canvas.scale(1f, -1f, w / 2f, h / 2f)
-        }
+        // HUD 镜像不再由 HudView 内部处理，改由 flipContainer.scaleY 统一翻转
+        // （这样 MapLibre 底图也跟着翻转，地图+HUD 元素一起镜像）
 
         // 只画 HUD 覆盖元素
         drawVehicleMarker(canvas, w, h)
         drawSpeedometer(canvas, w, h)
-
-        if (mirrorEnabled) {
-            canvas.restore()
-        }
 
         // OSM 归属标注（ODbL 协议要求）
         drawAttribution(canvas, w, h)
@@ -110,8 +103,8 @@ class HudView @JvmOverloads constructor(
             textAlign = Paint.Align.CENTER
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
         }
-        val attrY = if (mirrorEnabled) 24f else h - 8f
-        canvas.drawText("© OpenFreeMap © OpenStreetMap", w / 2f, attrY, paint)
+        // 归属标注始终画在画布底部（container 翻转时视觉上也正确）
+        canvas.drawText("© OpenFreeMap © OpenStreetMap", w / 2f, h - 8f, paint)
     }
 
     private fun drawVehicleMarker(canvas: Canvas, w: Float, h: Float) {

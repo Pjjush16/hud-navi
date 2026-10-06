@@ -365,6 +365,11 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         setContentView(R.layout.activity_main)
 
         flipContainer = findViewById(R.id.flipContainer)
+        // 初始化时设置镜像状态（默认 mirrorEnabled=true，翻转整个容器）
+        flipContainer.post {
+            flipContainer.pivotY = flipContainer.height / 2f
+            flipContainer.scaleY = if (hudView.mirrorEnabled) -1f else 1f
+        }
         permDeniedLayout = findViewById(R.id.permDeniedLayout)
         btnRetryPerm = findViewById(R.id.btnRetryPerm)
         hudView = findViewById(R.id.hudView)
@@ -452,6 +457,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onDoubleTap(e: MotionEvent): Boolean {
                 hudView.mirrorEnabled = !hudView.mirrorEnabled
+                // 翻转整个 flipContainer（MapView + HudView 一起翻转）
+                flipContainer.pivotY = flipContainer.height / 2f
+                flipContainer.scaleY = if (hudView.mirrorEnabled) -1f else 1f
                 updateWakeFeedbackMirror()
                 val state = if (hudView.mirrorEnabled) "镜像 ON" else "镜像 OFF"
                 Toast.makeText(this@MainActivity, state, Toast.LENGTH_SHORT).show()
@@ -487,9 +495,24 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             override fun onMapZoomIn() { handler.post { hudView.zoomOffset = (hudView.zoomOffset + 1.0f).coerceAtMost(3.0f); hudView.invalidate() } }
             override fun onMapZoomOut() { handler.post { hudView.zoomOffset = (hudView.zoomOffset - 1.0f).coerceAtLeast(-3.0f); hudView.invalidate() } }
             override fun onMapZoomReset() { handler.post { hudView.zoomOffset = 0f; hudView.invalidate() } }
-            override fun onMirrorToggle() { handler.post { hudView.mirrorEnabled = !hudView.mirrorEnabled; updateWakeFeedbackMirror() } }
-            override fun onMirrorOn() { handler.post { hudView.mirrorEnabled = true; updateWakeFeedbackMirror() } }
-            override fun onMirrorOff() { handler.post { hudView.mirrorEnabled = false; updateWakeFeedbackMirror() } }
+            override fun onMirrorToggle() { handler.post {
+                hudView.mirrorEnabled = !hudView.mirrorEnabled
+                flipContainer.pivotY = flipContainer.height / 2f
+                flipContainer.scaleY = if (hudView.mirrorEnabled) -1f else 1f
+                updateWakeFeedbackMirror()
+            } }
+            override fun onMirrorOn() { handler.post {
+                hudView.mirrorEnabled = true
+                flipContainer.pivotY = flipContainer.height / 2f
+                flipContainer.scaleY = -1f
+                updateWakeFeedbackMirror()
+            } }
+            override fun onMirrorOff() { handler.post {
+                hudView.mirrorEnabled = false
+                flipContainer.pivotY = flipContainer.height / 2f
+                flipContainer.scaleY = 1f
+                updateWakeFeedbackMirror()
+            } }
             override fun onNavigateTo(lat: Double, lng: Double, name: String) {
                 handler.post { startNavigationTo(lat, lng, name) }
             }
@@ -601,10 +624,14 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         when {
             command == "MIRROR_TOGGLE" -> {
                 hudView.mirrorEnabled = !hudView.mirrorEnabled
+                flipContainer.pivotY = flipContainer.height / 2f
+                flipContainer.scaleY = if (hudView.mirrorEnabled) -1f else 1f
                 updateWakeFeedbackMirror()
             }
             command == "MIRROR_OFF" -> {
                 hudView.mirrorEnabled = false
+                flipContainer.pivotY = flipContainer.height / 2f
+                flipContainer.scaleY = 1f
                 updateWakeFeedbackMirror()
             }
             command == "MAP_ZOOM_IN" -> {
