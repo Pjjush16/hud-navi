@@ -772,12 +772,19 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             smoothedWorldAcc[1].toDouble() * smoothedWorldAcc[1].toDouble() +
             smoothedWorldAcc[2].toDouble() * smoothedWorldAcc[2].toDouble()
         )
-        // v13.5: 传入世界坐标系加速度分量（北/东），让 EKF 积分速度
-        // smoothedWorldAcc[0]=North, [1]=East, [2]=Up（已通过旋转矩阵转换）
+        // v15.0: 路口状态传给 EKF，让 EKF 处理路口位置延迟/停车
+        ekf.isNearIntersection = nearIntersection
+
         ekf.predict(dt, vehicleBearing, targetSpeed * 1000f / 3600f, linearAccelMag,
             worldAccN = smoothedWorldAcc[0].toDouble(),
             worldAccE = smoothedWorldAcc[1].toDouble())
-        vehicleLat = ekf.lat; vehicleLng = ekf.lng
+
+        // v15.0: 路口场景用 EKF 的绘制位置（延迟/停车策略）
+        if (nearIntersection) {
+            vehicleLat = ekf.drawLat; vehicleLng = ekf.drawLng
+        } else {
+            vehicleLat = ekf.lat; vehicleLng = ekf.lng
+        }
 
         val gyroActive = hasGyro && (System.currentTimeMillis() - lastGyroTime) < 500
         val dtSec = dt / 1000.0
@@ -884,7 +891,8 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         }
 
         hudView.vehicleBearing = vehicleBearing
-        hudView.vehicleSpeed = (ekf.speed * 3.6).toFloat()
+        // v15.0: 路口场景用 EKF 的绘制速度（GPS 平滑速度）
+        hudView.vehicleSpeed = ((if (nearIntersection) ekf.drawSpeed else ekf.speed) * 3.6).toFloat()
 
         hudView.invalidate()
     }
