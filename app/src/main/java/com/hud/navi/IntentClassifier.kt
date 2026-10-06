@@ -420,14 +420,15 @@ class IntentClassifier(
     }
 
     /**
-     * 调用智谱 API（OpenAI 兼容格式）— 支持 Function Calling
+     * 调用智谱 API（流式 SSE）— 支持 Function Calling
      *
+     * 使用流式调用（stream=true），逐行解析 SSE 事件，累积 content 和 tool_calls。
      * 不开启 thinking（不传 thinking 参数），减少延迟和 token 消耗。
      *
      * @param messages 完整消息列表（system + user + tool messages）
      * @param tools    工具定义列表（null 表示不使用工具）
      * @param jsonMode 是否强制 JSON 输出（用于意图分类）
-     * @return 响应中的 message 对象（含 content 和/或 tool_calls）
+     * @return 拼装好的 message 对象（含 content 和/或 tool_calls）
      */
     private fun callApiRaw(messages: JSONArray, tools: JSONArray?, jsonMode: Boolean = false): JSONObject? {
         val url = URL("${SetupActivity.API_BASE_URL}/chat/completions")
@@ -441,12 +442,11 @@ class IntentClassifier(
 
         val model = modelId.ifBlank { "glm-4.7-flash" }
 
-        // 构建请求体：不开启 thinking，给足 token
         val body = JSONObject().apply {
             put("model", model)
             put("messages", messages)
+            put("stream", true)
             put("max_tokens", if (jsonMode) 2048 else 8192)
-            put("stream", false)
             put("temperature", if (jsonMode) 0.1 else 1.0)
 
             if (tools != null && tools.length() > 0) {
@@ -455,7 +455,7 @@ class IntentClassifier(
             }
         }
 
-        Log.d(TAG, "API request: model=$model, tools=${tools?.length() ?: 0}, jsonMode=$jsonMode")
+        Log.d(TAG, "API stream request: model=$model, tools=${tools?.length() ?: 0}, jsonMode=$jsonMode")
 
         OutputStreamWriter(conn.outputStream, "UTF-8").use { writer ->
             writer.write(body.toString())
@@ -472,31 +472,109 @@ class IntentClassifier(
             return null
         }
 
-        val responseBody = BufferedReader(InputStreamReader(conn.inputStream, "UTF-8")).use { it.readText() }
+        // 先读取全部 SSE 流为字符串，再逐行解析（避免 lambda 内 break/continue 限制）
+        val rawSse = BufferedReader(InputStreamReader(conn.inputStream, "UTF-8")).use { it.readText() }
         conn.disconnect()
 
-        val json = JSONObject(responseBody)
-        val choices = json.optJSONArray("choices") ?: return null
-        if (choices.length() == 0) return null
-        val choice = choices.getJSONObject(0)
-        val finishReason = choice.optString("finish_reason", "")
-        val message = choice.optJSONObject("message") ?: return null
+        // ===== SSE 解析 =====
+        val contentBuilder = StringBuilder()
+        val toolCallsMap = mutableMapOf<Int, JSONObject>()
+        var finishReason = ""
+        var chunkCount = 0
 
-        val content = message.optString("content", "")
-        val toolCalls = message.optJSONArray("tool_calls")
-        val usage = json.optJSONObject("usage")
+        for (rawLine in rawSse.split("\n")) {
+            val line = rawLine.trim()
+            if (!line.startsWith("data: ")) {
+                // 跳过空行、注释行、event: 行等
+                val _ = 0
+            } else {
+                val data = line.substring(6).trim()
+                if (data == "[DONE]") {
+                    // 流结束，不需要 break，后续行都是空的
+                    val _ = 0
+                } else {
+                    try {
+                        val chunk = JSONObject(data)
 
-        val logSb = StringBuilder("API response: finish=$finishReason, ")
-        logSb.append("tool_calls=${toolCalls?.length() ?: 0}, ")
-        logSb.append("content_len=${content.length}")
-        if (usage != null) {
-            logSb.append(", tokens=${usage.optInt("total_tokens", 0)}")
+                        // usage
+                        val chunkUsage = chunk.optJSONObject("usage")
+                        if (chunkUsage != null) {
+                            // 记录但不直接使用（最终 message 不需要 usage）
+                        }
+
+                        val choices = chunk.optJSONArray("choices")
+                        if (choices != null && choices.length() > 0) {
+                            val choice = choices.getJSONObject(0)
+
+                            // finish_reason
+                            val fr = choice.optString("finish_reason", "")
+                            if (fr.isNotBlank()) finishReason = fr
+
+                            val delta = choice.optJSONObject("delta")
+                            if (delta != null) {
+                                // 累积 content
+                                val deltaContent = delta.optString("content", "")
+                                if (deltaContent.isNotEmpty()) {
+                                    contentBuilder.append(deltaContent)
+                                }
+
+                                // 累积 tool_calls
+                                val deltaToolCalls = delta.optJSONArray("tool_calls")
+                                if (deltaToolCalls != null) {
+                                    for (i in 0 until deltaToolCalls.length()) {
+                                        val tc = deltaToolCalls.getJSONObject(i)
+                                        val index = tc.optInt("index", i)
+                                        val existing = toolCallsMap[index]
+
+                                        if (existing == null) {
+                                            toolCallsMap[index] = JSONObject(tc.toString())
+                                        } else {
+                                            val func = tc.optJSONObject("function")
+                                            if (func != null) {
+                                                val existFunc = existing.optJSONObject("function")
+                                                if (existFunc != null) {
+                                                    val existArgs = existFunc.optString("arguments", "")
+                                                    val newArgs = func.optString("arguments", "")
+                                                    existFunc.put("arguments", existArgs + newArgs)
+                                                }
+                                                val tcId = tc.optString("id", "")
+                                                if (tcId.isNotEmpty() && existing.optString("id", "").isEmpty()) {
+                                                    existing.put("id", tcId)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            chunkCount++
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "SSE chunk parse error: ${e.message}, data=${data.take(100)}")
+                    }
+                }
+            }
         }
-        Log.d(TAG, logSb.toString())
 
-        if (content.isBlank() && toolCalls == null) {
-            Log.w(TAG, "content AND tool_calls both empty! finish=$finishReason")
-            Log.w(TAG, "Raw response: ${responseBody.take(500)}")
+        // ===== 拼装 message 对象 =====
+        val message = JSONObject()
+        message.put("role", "assistant")
+        message.put("content", contentBuilder.toString())
+
+        if (toolCallsMap.isNotEmpty()) {
+            val toolCallsArray = JSONArray()
+            val sortedKeys = toolCallsMap.keys.sorted()
+            for (key in sortedKeys) {
+                toolCallsArray.put(toolCallsMap[key]!!)
+            }
+            message.put("tool_calls", toolCallsArray)
+        }
+
+        Log.d(TAG, "API stream done: chunks=$chunkCount, finish=$finishReason, " +
+                "content_len=${contentBuilder.length}, tool_calls=${toolCallsMap.size}")
+
+        if (contentBuilder.isEmpty() && toolCallsMap.isEmpty()) {
+            Log.w(TAG, "Stream: content AND tool_calls both empty! finish=$finishReason")
         }
 
         return message
