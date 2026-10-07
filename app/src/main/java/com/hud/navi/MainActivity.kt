@@ -1216,11 +1216,23 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             map.easeCamera(cameraUpdate, 100, false, null)
 
             // 更新车标位置 — 车标贴在路面上，由 MapLibre 3D 投影处理透视
-            // MAP 对齐模式下图标跟随路面倾斜，相机 bearing 跟随车辆方向，箭头自动朝前
             val vehiclePoint = Point.fromLngLat(drawLng, drawLat)
             val vehicleFeature = Feature.fromGeometry(vehiclePoint)
             map.style?.getSourceAs<GeoJsonSource>("vehicle-position")
                 ?.setGeoJson(FeatureCollection.fromFeatures(listOf(vehicleFeature)))
+
+            // 车标反向旋转：抵消相机 bearing，使箭头始终朝上（屏幕顶部）
+            // MAP 对齐保留 3D 倾斜效果，iconRotate 只控制图标在地图平面上的自转
+            val carLayer = map.style?.getLayerAs<SymbolLayer>("vehicle-marker")
+            carLayer?.setProperties(
+                iconImage("vehicle-icon"),
+                iconSize(0.6f),
+                iconAllowOverlap(true),
+                iconIgnorePlacement(true),
+                iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_MAP),
+                iconAnchor(Property.ICON_ANCHOR_CENTER),
+                iconRotate(-vehicleBearing)
+            )
         }
     }
 
