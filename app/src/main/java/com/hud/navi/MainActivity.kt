@@ -823,6 +823,12 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 if (abs(diff) < HEADING_DEAD_ZONE) headingFromGyro
                 else headingFromGyro + diff * 0.05f
             }
+            compassInitialized -> {
+                // 静止且无旋转矢量时，用磁力计罗盘驱动地图旋转
+                val diff = ((smoothedCompassBearing - headingFromGyro + 540f) % 360f) - 180f
+                if (abs(diff) < HEADING_DEAD_ZONE) headingFromGyro
+                else headingFromGyro + diff * 0.05f
+            }
             else -> headingFromGyro
         }
         vehicleBearing = ((newBearing % 360f) + 360f) % 360f
