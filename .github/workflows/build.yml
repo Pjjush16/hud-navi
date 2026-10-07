@@ -1,16 +1,14 @@
-name: Build Android APK
+name: Build Android APK (Canvas 2D Edition)
 
 on:
   push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+    branches: [ canvas-2d ]
   workflow_dispatch:
     inputs:
       ref:
-        description: 'Git ref (tag/branch/commit) to build'
+        description: 'Git ref to build'
         required: false
-        default: 'main'
+        default: 'canvas-2d'
 
 permissions:
   contents: write
@@ -21,6 +19,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,65 +34,33 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
 
-      - name: Download sherpa-onnx Android SDK and extract native libs
+      - name: Download sherpa-onnx SDK
         run: |
-          SHERPA_VERSION="${{ env.SHERPA_ONNX_VERSION }}"
-          echo "Downloading sherpa-onnx v${SHERPA_VERSION} Android SDK..."
-          
           mkdir -p app/libs
-          
-          AAR_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/v${SHERPA_VERSION}/sherpa-onnx-${SHERPA_VERSION}.aar"
-          echo "Downloading AAR: $AAR_URL"
-          wget -q "$AAR_URL" -O /tmp/sherpa-onnx.aar
-          echo "AAR downloaded: $(stat -c%s /tmp/sherpa-onnx.aar) bytes"
-          
-          # Extract .so files to jniLibs/ so Gradle stores them uncompressed + page-aligned
-          echo "Extracting native .so libraries..."
+          wget -q "https://github.com/k2-fsa/sherpa-onnx/releases/download/v${{ env.SHERPA_ONNX_VERSION }}/sherpa-onnx-${{ env.SHERPA_ONNX_VERSION }}.aar" -O /tmp/sherpa-onnx.aar
           mkdir -p /tmp/sherpa-aar-extract
           unzip -qo /tmp/sherpa-onnx.aar -d /tmp/sherpa-aar-extract
-          
-          for arch in arm64-v8a armeabi-v7a x86 x86_64; do
+          for arch in arm64-v8a armeabi-v7a; do
             if [ -d "/tmp/sherpa-aar-extract/jni/$arch" ]; then
               mkdir -p "app/src/main/jniLibs/$arch"
               cp /tmp/sherpa-aar-extract/jni/$arch/*.so "app/src/main/jniLibs/$arch/"
-              echo "  Extracted $arch: $(ls app/src/main/jniLibs/$arch/)"
             fi
           done
-          
-          # Re-pack AAR without the jni/ folder (classes.jar + other resources only)
-          # This prevents Gradle from double-packing the .so files
-          echo "Re-packing AAR without native libs..."
-          cd /tmp/sherpa-aar-extract
-          rm -rf jni/
-          zip -qr /tmp/sherpa-onnx-nojni.aar .
-          cd -
-          
-          # Use the stripped AAR for Java/Kotlin classes
+          cd /tmp/sherpa-aar-extract && rm -rf jni/ && zip -qr /tmp/sherpa-onnx-nojni.aar . && cd -
           cp /tmp/sherpa-onnx-nojni.aar app/libs/sherpa-onnx.aar
-          echo "AAR (without jni/) placed in app/libs/"
-          echo ""
-          echo "Native libs will be sourced from app/src/main/jniLibs/ (STORED + page-aligned)"
+          echo "sherpa-onnx SDK installed"
 
       - name: Download KWS Model
         run: |
           MODEL_DIR="app/src/main/assets/kws"
           mkdir -p "$MODEL_DIR"
-          
           if [ ! -f "$MODEL_DIR/tokens.txt" ]; then
-            echo "Downloading sherpa-onnx KWS model..."
-            wget -q "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile.tar.bz2" \
-              -O /tmp/kws-model.tar.bz2
+            wget -q "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile.tar.bz2" -O /tmp/kws-model.tar.bz2
             tar xjf /tmp/kws-model.tar.bz2 -C /tmp/
-            
             cp /tmp/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/tokens.txt "$MODEL_DIR/"
             cp /tmp/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx "$MODEL_DIR/"
             cp /tmp/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/decoder-epoch-12-avg-2-chunk-16-left-64.onnx "$MODEL_DIR/"
             cp /tmp/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx "$MODEL_DIR/"
-            
-            echo "Model files:"
-            ls -la "$MODEL_DIR"
-          else
-            echo "Model files already exist"
           fi
 
       - name: Build Debug APK
@@ -102,50 +69,36 @@ jobs:
       - name: Build Signed Release APK
         run: ./gradlew assembleRelease
 
-      - name: Re-align and re-sign Release APKs (native lib STORED + page alignment)
+      - name: Re-sign Release APKs
         run: |
           ZIPALIGN=$(find $ANDROID_HOME/build-tools -name zipalign | sort -V | tail -1)
           APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -1)
-          
-          echo "=== Fixing native lib compression and page alignment ==="
           for apk in app/build/outputs/apk/release/*-release.apk; do
             [ -f "$apk" ] || continue
             base=$(basename "$apk" .apk)
             dir=$(dirname "$apk")
             fixed="${dir}/${base}-fixed.apk"
-            
-            # Python script: rebuild APK with native libs STORED (uncompressed)
             python3 scripts/fix_native_libs.py "$apk" "$fixed"
-            
-            # Now zipalign for page alignment of stored entries
             aligned="${dir}/${base}-aligned.apk"
             $ZIPALIGN -v -p 4 "$fixed" "$aligned"
-            
-            # Re-sign
             $APKSIGNER sign \
               --ks keystore/hud-navi-release.jks \
               --ks-pass pass:hudnavi2026release \
               --ks-key-alias hud-navi \
               --key-pass pass:hudnavi2026release \
-              --v2-signing-enabled true \
-              --v3-signing-enabled true \
+              --v2-signing-enabled true --v3-signing-enabled true \
               "$aligned"
-            
-            # Replace original
-            mv "$aligned" "$apk"
-            rm -f "$fixed"
-            echo "✅ Fixed, aligned and re-signed: $(basename $apk)"
+            mv "$aligned" "$apk" && rm -f "$fixed"
+            echo "✅ $(basename $apk) — $(du -sh "$apk" | cut -f1)"
           done
 
-      - name: Verify Release APK signature
+      - name: Verify Release APK
         run: |
           APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -1)
-          echo "=== Verifying release APKs ==="
           for apk in app/build/outputs/apk/release/*-release.apk; do
             [ -f "$apk" ] || continue
             echo "--- $(basename $apk) ---"
             $APKSIGNER verify --verbose --print-certs "$apk" 2>&1
-            echo ""
           done
 
       - name: Get version name
@@ -154,35 +107,32 @@ jobs:
           VERSION=$(grep 'versionName' app/build.gradle.kts | head -1 | sed 's/.*"\(.*\)".*/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Upload Debug APK
+      - name: Upload APKs
         uses: actions/upload-artifact@v4
         with:
-          name: hud-navi-debug
-          path: app/build/outputs/apk/debug/*.apk
-
-      - name: Upload Release APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: hud-navi-release
-          path: app/build/outputs/apk/release/*-release.apk
+          name: hud-navi-canvas2d-apks
+          path: |
+            app/build/outputs/apk/release/*-release.apk
+            app/build/outputs/apk/debug/*.apk
 
       - name: Create GitHub Release
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || format('v{0}', steps.version.outputs.version) }}
-          name: hud-navi v${{ steps.version.outputs.version }}
+          tag_name: canvas2d-v${{ steps.version.outputs.version }}
+          name: "hud-navi v${{ steps.version.outputs.version }} (Canvas 2D Edition)"
           body: |
-            **hud-navi v${{ steps.version.outputs.version }}**
-            
-            Lightweight HUD navigation app for Android.
-            
-            - Custom app icon
-            - Signed release APK (V1+V2+V3)
-            - OpenStreetMap data attribution
-            - Mirror mode for windshield HUD projection
-            - **语音唤醒词识别** (哈德/你好小哈/小哈/哈德哈德)
-            
+            **hud-navi v${{ steps.version.outputs.version }} — Canvas 2D Edition**
+
+            自研 Canvas 2D 渲染引擎版本。不依赖 MapLibre GL，所有地图元素（道路、车标、HUD）均在 Canvas 上绘制。
+
+            **特点：**
+            - 自研透视投影引擎（45° 俯瞰视角）
+            - Overpass API 矢量路网
+            - 无 MapLibre 依赖，APK 更小
+            - 镜像模式（挡风玻璃投影）
+            - 语音唤醒词识别
+
             Commit: `${{ github.sha }}`
           files: |
             app/build/outputs/apk/release/*-release.apk
