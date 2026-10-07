@@ -286,7 +286,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 val vehicleFeature = Feature.fromGeometry(vehiclePoint)
                 style.addSource(GeoJsonSource("vehicle-position",
                     FeatureCollection.fromFeatures(listOf(vehicleFeature))))
-                style.addLayerAbove(SymbolLayer("vehicle-marker", "vehicle-position").withProperties(
+                style.addLayer(SymbolLayer("vehicle-marker", "vehicle-position").withProperties(
                     iconImage("vehicle-icon"),
                     iconSize(0.6f),
                     iconAllowOverlap(true),
