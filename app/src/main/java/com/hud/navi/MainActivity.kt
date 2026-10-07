@@ -224,11 +224,13 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         setContentView(R.layout.activity_main)
 
         flipContainer = findViewById(R.id.flipContainer)
-        // 初始化时设置镜像状态（默认 mirrorEnabled=true，翻转整个容器）
-        flipContainer.post {
-            flipContainer.pivotY = flipContainer.height / 2f
-            flipContainer.scaleY = if (hudView.mirrorEnabled) -1f else 1f
-        }
+        // 初始化时设置镜像状态（默认 mirrorEnabled=true）
+        // 注意：MapView 是 GLSurfaceView，View 级 scaleY 对 OpenGL 无效
+        // 地图镜像通过相机参数实现（bearing+180°, tilt 取反）
+        // HudView 单独用 scaleY 翻转
+        hudView.scaleY = if (hudView.mirrorEnabled) -1f else 1f
+        // 初始相机在 getMapAsync 回调中设置
+
         permDeniedLayout = findViewById(R.id.permDeniedLayout)
         btnRetryPerm = findViewById(R.id.btnRetryPerm)
         hudView = findViewById(R.id.hudView)
@@ -246,7 +248,8 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 // Z 轴 3m 眼高 → zoom ≈ 19.5（基准值，动态缩放由此加减）
                 // FOV 50° 通过 zoom 间接模拟
                 map.cameraPosition = CameraPosition.Builder()
-                    .tilt(HUD_TILT)
+                    .tilt(if (hudView.mirrorEnabled) -HUD_TILT else HUD_TILT)
+                    .bearing(if (hudView.mirrorEnabled) 180.0 else 0.0)
                     .zoom(19.5)
                     .build()
 
@@ -288,7 +291,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                     FeatureCollection.fromFeatures(listOf(vehicleFeature))))
                 style.addLayer(SymbolLayer("vehicle-marker", "vehicle-position").withProperties(
                     iconImage("vehicle-icon"),
-                    iconSize(0.6f),
+                    iconSize(0.5f),
                     iconAllowOverlap(true),
                     iconIgnorePlacement(true),
                     iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_VIEWPORT)
@@ -330,9 +333,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onDoubleTap(e: MotionEvent): Boolean {
                 hudView.mirrorEnabled = !hudView.mirrorEnabled
-                // 翻转整个 flipContainer（MapView + HudView 一起翻转）
-                flipContainer.pivotY = flipContainer.height / 2f
-                flipContainer.scaleY = if (hudView.mirrorEnabled) -1f else 1f
+                applyMirror(hudView.mirrorEnabled)
                 updateWakeFeedbackMirror()
                 val state = if (hudView.mirrorEnabled) "镜像 ON" else "镜像 OFF"
                 Toast.makeText(this@MainActivity, state, Toast.LENGTH_SHORT).show()
@@ -370,20 +371,17 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             override fun onMapZoomReset() { handler.post { hudView.zoomOffset = 0f; hudView.invalidate() } }
             override fun onMirrorToggle() { handler.post {
                 hudView.mirrorEnabled = !hudView.mirrorEnabled
-                flipContainer.pivotY = flipContainer.height / 2f
-                flipContainer.scaleY = if (hudView.mirrorEnabled) -1f else 1f
+                applyMirror(hudView.mirrorEnabled)
                 updateWakeFeedbackMirror()
             } }
             override fun onMirrorOn() { handler.post {
                 hudView.mirrorEnabled = true
-                flipContainer.pivotY = flipContainer.height / 2f
-                flipContainer.scaleY = -1f
+                applyMirror(true)
                 updateWakeFeedbackMirror()
             } }
             override fun onMirrorOff() { handler.post {
                 hudView.mirrorEnabled = false
-                flipContainer.pivotY = flipContainer.height / 2f
-                flipContainer.scaleY = 1f
+                applyMirror(false)
                 updateWakeFeedbackMirror()
             } }
             override fun onNavigateTo(lat: Double, lng: Double, name: String) {
@@ -497,14 +495,12 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         when {
             command == "MIRROR_TOGGLE" -> {
                 hudView.mirrorEnabled = !hudView.mirrorEnabled
-                flipContainer.pivotY = flipContainer.height / 2f
-                flipContainer.scaleY = if (hudView.mirrorEnabled) -1f else 1f
+                applyMirror(hudView.mirrorEnabled)
                 updateWakeFeedbackMirror()
             }
             command == "MIRROR_OFF" -> {
                 hudView.mirrorEnabled = false
-                flipContainer.pivotY = flipContainer.height / 2f
-                flipContainer.scaleY = 1f
+                applyMirror(false)
                 updateWakeFeedbackMirror()
             }
             command == "MAP_ZOOM_IN" -> {
@@ -1144,6 +1140,27 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     // 这是最接近驾驶员视角的最大倾角
     private val HUD_TILT = 60.0
 
+    // === 应用镜像状态 ===
+    // MapView 是 GLSurfaceView，View 级 scaleY 对 OpenGL 无效
+    // 地图镜像通过相机参数实现：bearing+180° + tilt 取反
+    // HudView 单独用 scaleY 翻转
+    private fun applyMirror(enabled: Boolean) {
+        hudView.scaleY = if (enabled) -1f else 1f
+        if (maplibreStyleLoaded) {
+            mapView.getMapAsync { map ->
+                val cp = map.cameraPosition
+                map.easeCamera(CameraUpdateFactory.newCameraPosition(
+                    CameraPosition.Builder()
+                        .target(cp.target)
+                        .bearing(cp.bearing + (if (enabled) 180.0 else 0.0))
+                        .tilt(if (enabled) -HUD_TILT else HUD_TILT)
+                        .zoom(cp.zoom)
+                        .build()
+                ), 200, false, null)
+            }
+        }
+    }
+
     private fun updateMapLibreCamera() {
         if (!maplibreStyleLoaded || vehicleLat == 0.0) return
 
@@ -1151,11 +1168,14 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         val drawLng = if (hudView.isSnapped) hudView.snappedLng else vehicleLng
         val dynamicZoom = hudView.getDynamicZoom(hudView.vehicleSpeed)
 
+        val mirrorBearing = if (hudView.mirrorEnabled) vehicleBearing.toDouble() + 180.0 else vehicleBearing.toDouble()
+        val mirrorTilt = if (hudView.mirrorEnabled) -HUD_TILT else HUD_TILT
+
         val cameraUpdate = CameraUpdateFactory.newCameraPosition(
             CameraPosition.Builder()
                 .target(LatLng(drawLat, drawLng))
-                .bearing(vehicleBearing.toDouble())
-                .tilt(HUD_TILT)
+                .bearing(mirrorBearing)
+                .tilt(mirrorTilt)
                 .zoom(dynamicZoom.toDouble())
                 .build()
         )
@@ -1173,8 +1193,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     }
 
     // === 生成车标图标（蓝色圆 + 白色 chevron 箭头） ===
+    // 48x48 像素，iconSize 0.5 → 渲染 24px ≈ zoom16 主干路宽度
     private fun createVehicleIconBitmap(): Bitmap {
-        val size = 128
+        val size = 48
         val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = android.graphics.Canvas(bmp)
         val cx = size / 2f
@@ -1185,14 +1206,14 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             color = android.graphics.Color.WHITE
             style = android.graphics.Paint.Style.FILL
         }
-        canvas.drawCircle(cx, cy, size * 0.48f, whiteBorder)
+        canvas.drawCircle(cx, cy, size * 0.46f, whiteBorder)
 
         // 蓝色内圆
         val blueFill = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
             color = android.graphics.Color.parseColor("#2196F3")
             style = android.graphics.Paint.Style.FILL
         }
-        canvas.drawCircle(cx, cy, size * 0.42f, blueFill)
+        canvas.drawCircle(cx, cy, size * 0.38f, blueFill)
 
         // 白色 chevron 箭头（朝上）
         val arrowPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
@@ -1200,10 +1221,10 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             style = android.graphics.Paint.Style.FILL
         }
         val arrowPath = android.graphics.Path().apply {
-            moveTo(cx, cy - size * 0.25f)           // 尖端（上）
-            lineTo(cx - size * 0.2f, cy + size * 0.2f)  // 左肩
-            lineTo(cx, cy + size * 0.02f)             // 中凹
-            lineTo(cx + size * 0.2f, cy + size * 0.2f)  // 右肩
+            moveTo(cx, cy - size * 0.24f)
+            lineTo(cx - size * 0.18f, cy + size * 0.18f)
+            lineTo(cx, cy + size * 0.02f)
+            lineTo(cx + size * 0.18f, cy + size * 0.18f)
             close()
         }
         canvas.drawPath(arrowPath, arrowPaint)
