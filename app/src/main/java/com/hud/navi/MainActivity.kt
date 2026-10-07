@@ -723,6 +723,19 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         tryFetchRoads()
     }
 
+    // LocationListener 必须实现的三个方法（老版本 Android 上是抽象方法，缺失会导致 AbstractMethodError 闪退）
+    override fun onProviderDisabled(provider: String) {
+        Log.w(TAG, "Location provider disabled: $provider")
+    }
+
+    override fun onProviderEnabled(provider: String) {
+        Log.i(TAG, "Location provider enabled: $provider")
+    }
+
+    override fun onStatusChanged(provider: String, status: Int, extras: android.os.Bundle?) {
+        Log.d(TAG, "Location provider status: $provider -> $status")
+    }
+
     private fun tryFetchRoads() {
         if (targetLat == 0.0) return
         val now = System.currentTimeMillis()
