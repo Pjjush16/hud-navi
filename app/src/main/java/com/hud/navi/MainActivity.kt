@@ -247,8 +247,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 // MapLibre 最大 tilt 60°（硬限制），这是最接近驾驶员视角的最大倾角
                 // Z 轴 3m 眼高 → zoom ≈ 19.5（基准值，动态缩放由此加减）
                 // FOV 50° 通过 zoom 间接模拟
+                // 镜像模式：bearing+180° 翻转地图（tilt 不能为负，MapLibre 硬性限制 0-60°）
                 map.cameraPosition = CameraPosition.Builder()
-                    .tilt(if (hudView.mirrorEnabled) -HUD_TILT else HUD_TILT)
+                    .tilt(HUD_TILT)
                     .bearing(if (hudView.mirrorEnabled) 180.0 else 0.0)
                     .zoom(19.5)
                     .build()
@@ -1144,16 +1145,21 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     // MapView 是 GLSurfaceView，View 级 scaleY 对 OpenGL 无效
     // 地图镜像通过相机参数实现：bearing+180° + tilt 取反
     // HudView 单独用 scaleY 翻转
+    // MapLibre tilt 硬性限制 0-60°，不能为负
+    // 镜像方案：bearing+180° 翻转地图（左右互换），tilt 保持正值
     private fun applyMirror(enabled: Boolean) {
         hudView.scaleY = if (enabled) -1f else 1f
         if (maplibreStyleLoaded) {
             mapView.getMapAsync { map ->
                 val cp = map.cameraPosition
+                // 获取当前 bearing（不带镜像偏移的基础值）
+                val baseBearing = vehicleBearing.toDouble()
+                val mirrorBearing = if (enabled) baseBearing + 180.0 else baseBearing
                 map.easeCamera(CameraUpdateFactory.newCameraPosition(
                     CameraPosition.Builder()
                         .target(cp.target)
-                        .bearing(cp.bearing + (if (enabled) 180.0 else 0.0))
-                        .tilt(if (enabled) -HUD_TILT else HUD_TILT)
+                        .bearing(mirrorBearing)
+                        .tilt(HUD_TILT)  // 始终正值
                         .zoom(cp.zoom)
                         .build()
                 ), 200, false, null)
@@ -1168,14 +1174,14 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         val drawLng = if (hudView.isSnapped) hudView.snappedLng else vehicleLng
         val dynamicZoom = hudView.getDynamicZoom(hudView.vehicleSpeed)
 
+        // MapLibre tilt 硬性限制 0-60°，镜像用 bearing+180° 实现
         val mirrorBearing = if (hudView.mirrorEnabled) vehicleBearing.toDouble() + 180.0 else vehicleBearing.toDouble()
-        val mirrorTilt = if (hudView.mirrorEnabled) -HUD_TILT else HUD_TILT
 
         val cameraUpdate = CameraUpdateFactory.newCameraPosition(
             CameraPosition.Builder()
                 .target(LatLng(drawLat, drawLng))
                 .bearing(mirrorBearing)
-                .tilt(mirrorTilt)
+                .tilt(HUD_TILT)  // 始终正值
                 .zoom(dynamicZoom.toDouble())
                 .build()
         )
@@ -1189,6 +1195,15 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             val vehicleFeature = Feature.fromGeometry(vehiclePoint)
             map.style?.getSourceAs<GeoJsonSource>("vehicle-position")
                 ?.setGeoJson(FeatureCollection.fromFeatures(listOf(vehicleFeature)))
+            
+            // 镜像模式下地图翻转 180°，车标也要跟着转 180° 才能指向正确方向
+            if (hudView.mirrorEnabled) {
+                map.style?.getLayerAs<SymbolLayer>("vehicle-marker")
+                    ?.setProperties(PropertyFactory.iconRotate(180f))
+            } else {
+                map.style?.getLayerAs<SymbolLayer>("vehicle-marker")
+                    ?.setProperties(PropertyFactory.iconRotate(0f))
+            }
         }
     }
 
