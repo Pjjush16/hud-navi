@@ -1197,13 +1197,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 ?.setGeoJson(FeatureCollection.fromFeatures(listOf(vehicleFeature)))
             
             // 镜像模式下地图翻转 180°，车标也要跟着转 180° 才能指向正确方向
-            if (hudView.mirrorEnabled) {
-                map.style?.getLayerAs<SymbolLayer>("vehicle-marker")
-                    ?.setProperties(PropertyFactory.iconRotate(180f))
-            } else {
-                map.style?.getLayerAs<SymbolLayer>("vehicle-marker")
-                    ?.setProperties(PropertyFactory.iconRotate(0f))
-            }
+            val iconRotation = if (hudView.mirrorEnabled) 180f else 0f
+            map.style?.getLayerAs<SymbolLayer>("vehicle-marker")
+                ?.setProperties(iconRotate(iconRotation))
         }
     }
 
