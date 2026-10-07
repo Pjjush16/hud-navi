@@ -224,16 +224,12 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         setContentView(R.layout.activity_main)
 
         flipContainer = findViewById(R.id.flipContainer)
-        // 初始化时设置镜像状态（默认 mirrorEnabled=true）
-        // 注意：MapView 是 GLSurfaceView，View 级 scaleY 对 OpenGL 无效
-        // 地图镜像通过相机参数实现（bearing+180°, tilt 取反）
-        // HudView 单独用 scaleY 翻转
-        hudView.scaleY = if (hudView.mirrorEnabled) -1f else 1f
-        // 初始相机在 getMapAsync 回调中设置
-
         permDeniedLayout = findViewById(R.id.permDeniedLayout)
         btnRetryPerm = findViewById(R.id.btnRetryPerm)
         hudView = findViewById(R.id.hudView)
+        // 初始化时设置镜像状态（默认 mirrorEnabled=true）
+        // HudView 单独用 scaleY 翻转，MapView 是 GLSurfaceView 不受 View 级 scaleY 影响
+        hudView.scaleY = if (hudView.mirrorEnabled) -1f else 1f
 
         // MapLibre MapView 初始化
         mapView = findViewById(R.id.mapView)
