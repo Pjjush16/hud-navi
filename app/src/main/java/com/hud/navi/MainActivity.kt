@@ -318,7 +318,10 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                     iconSize(0.6f),
                     iconAllowOverlap(true),
                     iconIgnorePlacement(true),
-                    iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_VIEWPORT)
+                    // MAP 对齐：图标贴在地图平面上，跟随 3D 透视倾斜（不再悬浮）
+                    // viewport 对齐 = 始终面向屏幕（悬浮感）；map 对齐 = 平铺在路面上
+                    iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_MAP),
+                    iconAnchor(Property.ICON_ANCHOR_CENTER)
                 ))
 
                 Log.i(TAG, "MapLibre style loaded (HUD dark, tilt=75° pitch=-15°, z=3m, FOV≈50°)")
@@ -1207,7 +1210,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             map.easeCamera(cameraUpdate, 100, false, null)
 
             // 更新车标位置 — 车标贴在路面上，由 MapLibre 3D 投影处理透视
-            // viewport 对齐模式下图标始终朝上（即车辆前进方向），无需手动设旋转
+            // MAP 对齐模式下图标跟随路面倾斜，相机 bearing 跟随车辆方向，箭头自动朝前
             val vehiclePoint = Point.fromLngLat(drawLng, drawLat)
             val vehicleFeature = Feature.fromGeometry(vehiclePoint)
             map.style?.getSourceAs<GeoJsonSource>("vehicle-position")
