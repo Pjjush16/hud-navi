@@ -1,6 +1,6 @@
 {
   "version": 8,
-  "name": "HUD Dark",
+  "name": "HUD Dark - Uniform Roads",
   "sources": {
     "osm": {
       "type": "vector",
@@ -30,11 +30,7 @@
       "type": "fill",
       "source": "osm",
       "source-layer": "landcover",
-      "filter": [
-        "==",
-        "class",
-        "wood"
-      ],
+      "filter": ["==", "class", "wood"],
       "paint": {
         "fill-color": "#0a120a"
       }
@@ -44,13 +40,7 @@
       "type": "fill",
       "source": "osm",
       "source-layer": "landuse",
-      "filter": [
-        "in",
-        "class",
-        "residential",
-        "commercial",
-        "industrial"
-      ],
+      "filter": ["in", "class", "residential", "commercial", "industrial"],
       "paint": {
         "fill-color": "#111111"
       }
@@ -62,65 +52,27 @@
       "source-layer": "building",
       "paint": {
         "fill-extrusion-color": "#1a1a2a",
-        "fill-extrusion-height": [
-          "coalesce",
-          [
-            "get",
-            "render_height"
-          ],
-          5
-        ],
-        "fill-extrusion-base": [
-          "coalesce",
-          [
-            "get",
-            "render_min_height"
-          ],
-          0
-        ],
+        "fill-extrusion-height": ["coalesce", ["get", "render_height"], 5],
+        "fill-extrusion-base": ["coalesce", ["get", "render_min_height"], 0],
         "fill-extrusion-opacity": 0.7
       },
       "minzoom": 15
     },
+
     {
       "id": "road-motorway-casing",
       "type": "line",
       "source": "osm",
       "source-layer": "transportation",
-      "filter": [
-        "==",
-        "class",
-        "motorway"
-      ],
+      "filter": ["==", "class", "motorway"],
       "layout": {
         "line-cap": "round",
         "line-join": "round"
       },
       "paint": {
-        "line-color": "#1a1400",
+        "line-color": "#FFFFFF",
         "line-width": {
-          "stops": [
-            [
-              10,
-              8
-            ],
-            [
-              14,
-              20
-            ],
-            [
-              16,
-              32
-            ],
-            [
-              18,
-              50
-            ],
-            [
-              20,
-              64
-            ]
-          ]
+          "stops": [[10, 10], [14, 24], [16, 36], [18, 54], [20, 68]]
         }
       }
     },
@@ -129,40 +81,15 @@
       "type": "line",
       "source": "osm",
       "source-layer": "transportation",
-      "filter": [
-        "==",
-        "class",
-        "trunk"
-      ],
+      "filter": ["==", "class", "trunk"],
       "layout": {
         "line-cap": "round",
         "line-join": "round"
       },
       "paint": {
-        "line-color": "#1a0f00",
+        "line-color": "#FFFFFF",
         "line-width": {
-          "stops": [
-            [
-              10,
-              7
-            ],
-            [
-              14,
-              18
-            ],
-            [
-              16,
-              28
-            ],
-            [
-              18,
-              44
-            ],
-            [
-              20,
-              56
-            ]
-          ]
+          "stops": [[10, 9], [14, 22], [16, 32], [18, 48], [20, 60]]
         }
       }
     },
@@ -171,166 +98,15 @@
       "type": "line",
       "source": "osm",
       "source-layer": "transportation",
-      "filter": [
-        "==",
-        "class",
-        "primary"
-      ],
+      "filter": ["==", "class", "primary"],
       "layout": {
         "line-cap": "round",
         "line-join": "round"
       },
       "paint": {
-        "line-color": "#0f0f00",
+        "line-color": "#FFFFFF",
         "line-width": {
-          "stops": [
-            [
-              10,
-              6
-            ],
-            [
-              14,
-              16
-            ],
-            [
-              16,
-              24
-            ],
-            [
-              18,
-              38
-            ],
-            [
-              20,
-              48
-            ]
-          ]
-        }
-      }
-    },
-    {
-      "id": "road-motorway",
-      "type": "line",
-      "source": "osm",
-      "source-layer": "transportation",
-      "filter": [
-        "==",
-        "class",
-        "motorway"
-      ],
-      "layout": {
-        "line-cap": "round",
-        "line-join": "round"
-      },
-      "paint": {
-        "line-color": "#FFD700",
-        "line-width": {
-          "stops": [
-            [
-              10,
-              5
-            ],
-            [
-              14,
-              14
-            ],
-            [
-              16,
-              24
-            ],
-            [
-              18,
-              38
-            ],
-            [
-              20,
-              50
-            ]
-          ]
-        }
-      }
-    },
-    {
-      "id": "road-trunk",
-      "type": "line",
-      "source": "osm",
-      "source-layer": "transportation",
-      "filter": [
-        "==",
-        "class",
-        "trunk"
-      ],
-      "layout": {
-        "line-cap": "round",
-        "line-join": "round"
-      },
-      "paint": {
-        "line-color": "#FF8C00",
-        "line-width": {
-          "stops": [
-            [
-              10,
-              4
-            ],
-            [
-              14,
-              12
-            ],
-            [
-              16,
-              20
-            ],
-            [
-              18,
-              32
-            ],
-            [
-              20,
-              42
-            ]
-          ]
-        }
-      }
-    },
-    {
-      "id": "road-primary",
-      "type": "line",
-      "source": "osm",
-      "source-layer": "transportation",
-      "filter": [
-        "==",
-        "class",
-        "primary"
-      ],
-      "layout": {
-        "line-cap": "round",
-        "line-join": "round"
-      },
-      "paint": {
-        "line-color": "#FFCC00",
-        "line-width": {
-          "stops": [
-            [
-              10,
-              3.5
-            ],
-            [
-              14,
-              10
-            ],
-            [
-              16,
-              16
-            ],
-            [
-              18,
-              26
-            ],
-            [
-              20,
-              34
-            ]
-          ]
+          "stops": [[10, 8], [14, 20], [16, 28], [18, 42], [20, 52]]
         }
       }
     },
@@ -339,86 +115,15 @@
       "type": "line",
       "source": "osm",
       "source-layer": "transportation",
-      "filter": [
-        "all",
-        [
-          "==",
-          "$type",
-          "LineString"
-        ],
-        [
-          "in",
-          "class",
-          "secondary"
-        ]
-      ],
-      "paint": {
-        "line-width": {
-          "stops": [
-            [
-              10,
-              5
-            ],
-            [
-              14,
-              14
-            ],
-            [
-              16,
-              22
-            ],
-            [
-              18,
-              34
-            ],
-            [
-              20,
-              42
-            ]
-          ]
-        },
-        "line-color": "#0a0a0a"
-      }
-    },
-    {
-      "id": "road-secondary",
-      "type": "line",
-      "source": "osm",
-      "source-layer": "transportation",
-      "filter": [
-        "==",
-        "class",
-        "secondary"
-      ],
+      "filter": ["==", "class", "secondary"],
       "layout": {
         "line-cap": "round",
         "line-join": "round"
       },
       "paint": {
-        "line-color": "#E0E0E0",
+        "line-color": "#FFFFFF",
         "line-width": {
-          "stops": [
-            [
-              10,
-              3
-            ],
-            [
-              14,
-              9
-            ],
-            [
-              16,
-              15
-            ],
-            [
-              18,
-              24
-            ],
-            [
-              20,
-              30
-            ]
-          ]
+          "stops": [[10, 7], [14, 18], [16, 26], [18, 38], [20, 46]]
         }
       }
     },
@@ -427,45 +132,102 @@
       "type": "line",
       "source": "osm",
       "source-layer": "transportation",
-      "filter": [
-        "all",
-        [
-          "==",
-          "$type",
-          "LineString"
-        ],
-        [
-          "in",
-          "class",
-          "tertiary"
-        ]
-      ],
+      "filter": ["==", "class", "tertiary"],
+      "layout": {
+        "line-cap": "round",
+        "line-join": "round"
+      },
       "paint": {
+        "line-color": "#FFFFFF",
         "line-width": {
-          "stops": [
-            [
-              12,
-              3
-            ],
-            [
-              14,
-              10
-            ],
-            [
-              16,
-              18
-            ],
-            [
-              18,
-              28
-            ],
-            [
-              20,
-              36
-            ]
-          ]
-        },
-        "line-color": "#080808"
+          "stops": [[12, 5], [14, 14], [16, 22], [18, 32], [20, 40]]
+        }
+      }
+    },
+    {
+      "id": "road-minor-casing",
+      "type": "line",
+      "source": "osm",
+      "source-layer": "transportation",
+      "filter": ["in", "class", "minor", "service", "residential", "unclassified"],
+      "layout": {
+        "line-cap": "round",
+        "line-join": "round"
+      },
+      "paint": {
+        "line-color": "#FFFFFF",
+        "line-width": {
+          "stops": [[12, 3], [14, 8], [16, 14], [18, 22], [20, 30]]
+        }
+      }
+    },
+
+    {
+      "id": "road-motorway",
+      "type": "line",
+      "source": "osm",
+      "source-layer": "transportation",
+      "filter": ["==", "class", "motorway"],
+      "layout": {
+        "line-cap": "round",
+        "line-join": "round"
+      },
+      "paint": {
+        "line-color": "#3a3a3a",
+        "line-width": {
+          "stops": [[10, 7], [14, 18], [16, 28], [18, 42], [20, 52]]
+        }
+      }
+    },
+    {
+      "id": "road-trunk",
+      "type": "line",
+      "source": "osm",
+      "source-layer": "transportation",
+      "filter": ["==", "class", "trunk"],
+      "layout": {
+        "line-cap": "round",
+        "line-join": "round"
+      },
+      "paint": {
+        "line-color": "#3a3a3a",
+        "line-width": {
+          "stops": [[10, 6], [14, 16], [16, 24], [18, 36], [20, 46]]
+        }
+      }
+    },
+    {
+      "id": "road-primary",
+      "type": "line",
+      "source": "osm",
+      "source-layer": "transportation",
+      "filter": ["==", "class", "primary"],
+      "layout": {
+        "line-cap": "round",
+        "line-join": "round"
+      },
+      "paint": {
+        "line-color": "#3a3a3a",
+        "line-width": {
+          "stops": [[10, 5], [14, 14], [16, 20], [18, 30], [20, 40]]
+        }
+      }
+    },
+    {
+      "id": "road-secondary",
+      "type": "line",
+      "source": "osm",
+      "source-layer": "transportation",
+      "filter": ["==", "class", "secondary"],
+      "layout": {
+        "line-cap": "round",
+        "line-join": "round"
+      },
+      "paint": {
+        "line-color": "#3a3a3a",
+        "line-width": {
+          "stops": [[10, 4], [14, 12], [16, 18], [18, 28], [20, 36]]
+        }
       }
     },
     {
@@ -473,40 +235,15 @@
       "type": "line",
       "source": "osm",
       "source-layer": "transportation",
-      "filter": [
-        "==",
-        "class",
-        "tertiary"
-      ],
+      "filter": ["==", "class", "tertiary"],
       "layout": {
         "line-cap": "round",
         "line-join": "round"
       },
       "paint": {
-        "line-color": "#AAAAAA",
+        "line-color": "#3a3a3a",
         "line-width": {
-          "stops": [
-            [
-              12,
-              1.5
-            ],
-            [
-              14,
-              6
-            ],
-            [
-              16,
-              12
-            ],
-            [
-              18,
-              20
-            ],
-            [
-              20,
-              26
-            ]
-          ]
+          "stops": [[12, 2], [14, 8], [16, 14], [18, 22], [20, 30]]
         }
       }
     },
@@ -515,43 +252,15 @@
       "type": "line",
       "source": "osm",
       "source-layer": "transportation",
-      "filter": [
-        "in",
-        "class",
-        "minor",
-        "service",
-        "residential",
-        "unclassified"
-      ],
+      "filter": ["in", "class", "minor", "service", "residential", "unclassified"],
       "layout": {
         "line-cap": "round",
         "line-join": "round"
       },
       "paint": {
-        "line-color": "#666666",
+        "line-color": "#3a3a3a",
         "line-width": {
-          "stops": [
-            [
-              12,
-              1
-            ],
-            [
-              14,
-              4
-            ],
-            [
-              16,
-              8
-            ],
-            [
-              18,
-              14
-            ],
-            [
-              20,
-              20
-            ]
-          ]
+          "stops": [[12, 1], [14, 4], [16, 8], [18, 14], [20, 22]]
         }
       }
     }
