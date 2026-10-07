@@ -65,7 +65,7 @@ import org.maplibre.android.maps.Style
 import org.maplibre.android.style.layers.LineLayer
 import org.maplibre.android.style.layers.SymbolLayer
 import android.graphics.Bitmap
-import android.graphics.Canvas as GCanvas
+
 import org.maplibre.android.style.layers.Property
 import org.maplibre.android.style.layers.PropertyFactory.*
 import org.maplibre.android.style.sources.GeoJsonSource
@@ -291,7 +291,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                     iconSize(0.6f),
                     iconAllowOverlap(true),
                     iconIgnorePlacement(true),
-                    iconRotationAlignment("viewport")
+                    iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_VIEWPORT)
                 ))
 
                 Log.i(TAG, "MapLibre style loaded (HUD dark, tilt=75° pitch=-15°, z=3m, FOV≈50°)")
@@ -1176,7 +1176,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private fun createVehicleIconBitmap(): Bitmap {
         val size = 128
         val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        val canvas = GCanvas(bmp)
+        val canvas = android.graphics.Canvas(bmp)
         val cx = size / 2f
         val cy = size / 2f
 
