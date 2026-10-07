@@ -218,16 +218,37 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
+        // v14.7.7: 全局异常捕获 — 防止任何子模块崩溃导致闪退
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            Log.e(TAG, "FATAL CRASH in ${thread.name}: ${throwable.message}", throwable)
+            // 记录崩溃信息到文件，方便排查
+            try {
+                val crashFile = java.io.File(getExternalFilesDir(null), "crash_log.txt")
+                crashFile.appendText("[${java.util.Date()}] ${throwable.javaClass.simpleName}: ${throwable.message}\n")
+                throwable.stackTrace.forEach { crashFile.appendText("  at $it\n") }
+            } catch (_: Exception) {}
+            // 不终止进程 — 让系统默认处理器处理（会显示崩溃对话框但保留日志）
+        }
+
         // MapLibre 初始化（必须在 setContentView 之前）
-        MapLibre.getInstance(this)
+        try {
+            MapLibre.getInstance(this)
+            Log.i(TAG, "MapLibre.getInstance() OK")
+        } catch (e: Exception) {
+            Log.e(TAG, "MapLibre.getInstance() FAILED: ${e.message}", e)
+        }
 
         setContentView(R.layout.activity_main)
 
         flipContainer = findViewById(R.id.flipContainer)
         // 初始化时设置镜像状态（默认 mirrorEnabled=true，翻转整个容器）
         flipContainer.post {
-            flipContainer.pivotY = flipContainer.height / 2f
-            flipContainer.scaleY = if (hudView.mirrorEnabled) -1f else 1f
+            try {
+                flipContainer.pivotY = flipContainer.height / 2f
+                flipContainer.scaleY = if (::hudView.isInitialized && hudView.mirrorEnabled) -1f else 1f
+            } catch (e: Exception) {
+                Log.w(TAG, "flipContainer init error: ${e.message}")
+            }
         }
         permDeniedLayout = findViewById(R.id.permDeniedLayout)
         btnRetryPerm = findViewById(R.id.btnRetryPerm)
@@ -235,8 +256,14 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
         // MapLibre MapView 初始化
         mapView = findViewById(R.id.mapView)
-        mapView.onCreate(savedInstanceState)
+        try {
+            mapView.onCreate(savedInstanceState)
+            Log.i(TAG, "mapView.onCreate() OK")
+        } catch (e: Exception) {
+            Log.e(TAG, "mapView.onCreate() FAILED: ${e.message}", e)
+        }
         mapView.getMapAsync { map ->
+          try {
             // 加载 HUD 暗色样式（assets 中的 JSON）
             map.setStyle(Style.Builder().fromUri("asset://hud_dark_style.json")) { style ->
                 maplibreStyleLoaded = true
@@ -296,6 +323,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
                 Log.i(TAG, "MapLibre style loaded (HUD dark, tilt=75° pitch=-15°, z=3m, FOV≈50°)")
             }
+          } catch (e: Exception) {
+            Log.e(TAG, "MapLibre getMapAsync FAILED: ${e.message}", e)
+          }
         }
 
         // 路线变更回调：更新 MapLibre GeoJSON
