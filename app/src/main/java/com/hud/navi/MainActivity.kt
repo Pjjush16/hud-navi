@@ -63,6 +63,9 @@ import org.maplibre.android.geometry.LatLng
 import org.maplibre.android.maps.MapView
 import org.maplibre.android.maps.Style
 import org.maplibre.android.style.layers.LineLayer
+import org.maplibre.android.style.layers.SymbolLayer
+import android.graphics.Bitmap
+import android.graphics.Canvas as GCanvas
 import org.maplibre.android.style.layers.Property
 import org.maplibre.android.style.layers.PropertyFactory.*
 import org.maplibre.android.style.sources.GeoJsonSource
@@ -275,6 +278,21 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                     lineWidth(4f),
                     lineColor("#00BFFF")
                 ), "route-outline")
+
+                // 车标 SymbolLayer — 贴在路面上（MapLibre 3D 投影自动处理透视）
+                val vehicleIconBitmap = createVehicleIconBitmap()
+                style.addImage("vehicle-icon", vehicleIconBitmap)
+                val vehiclePoint = Point.fromLngLat(0.0, 0.0)
+                val vehicleFeature = Feature.fromGeometry(vehiclePoint)
+                style.addSource(GeoJsonSource("vehicle-position",
+                    FeatureCollection.fromFeatures(listOf(vehicleFeature))))
+                style.addLayerAbove(SymbolLayer("vehicle-marker", "vehicle-position").withProperties(
+                    iconImage("vehicle-icon"),
+                    iconSize(0.6f),
+                    iconAllowOverlap(true),
+                    iconIgnorePlacement(true),
+                    iconRotationAlignment("viewport")
+                ))
 
                 Log.i(TAG, "MapLibre style loaded (HUD dark, tilt=75° pitch=-15°, z=3m, FOV≈50°)")
             }
@@ -1144,7 +1162,53 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         // animateCamera 太慢（300ms），用 easeCamera 快速跟随
         mapView.getMapAsync { map ->
             map.easeCamera(cameraUpdate, 100, false, null)
+
+            // 更新车标位置 — 车标贴在路面上，由 MapLibre 3D 投影处理透视
+            // viewport 对齐模式下图标始终朝上（即车辆前进方向），无需手动设旋转
+            val vehiclePoint = Point.fromLngLat(drawLng, drawLat)
+            val vehicleFeature = Feature.fromGeometry(vehiclePoint)
+            map.style?.getSourceAs<GeoJsonSource>("vehicle-position")
+                ?.setGeoJson(FeatureCollection.fromFeatures(listOf(vehicleFeature)))
         }
+    }
+
+    // === 生成车标图标（蓝色圆 + 白色 chevron 箭头） ===
+    private fun createVehicleIconBitmap(): Bitmap {
+        val size = 128
+        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = GCanvas(bmp)
+        val cx = size / 2f
+        val cy = size / 2f
+
+        // 白色外圈
+        val whiteBorder = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.WHITE
+            style = android.graphics.Paint.Style.FILL
+        }
+        canvas.drawCircle(cx, cy, size * 0.48f, whiteBorder)
+
+        // 蓝色内圆
+        val blueFill = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.parseColor("#2196F3")
+            style = android.graphics.Paint.Style.FILL
+        }
+        canvas.drawCircle(cx, cy, size * 0.42f, blueFill)
+
+        // 白色 chevron 箭头（朝上）
+        val arrowPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.WHITE
+            style = android.graphics.Paint.Style.FILL
+        }
+        val arrowPath = android.graphics.Path().apply {
+            moveTo(cx, cy - size * 0.25f)           // 尖端（上）
+            lineTo(cx - size * 0.2f, cy + size * 0.2f)  // 左肩
+            lineTo(cx, cy + size * 0.02f)             // 中凹
+            lineTo(cx + size * 0.2f, cy + size * 0.2f)  // 右肩
+            close()
+        }
+        canvas.drawPath(arrowPath, arrowPaint)
+
+        return bmp
     }
 
     // === MapLibre 路线更新（GeoJSON） ===

@@ -88,8 +88,8 @@ class HudView @JvmOverloads constructor(
         // HUD 镜像不再由 HudView 内部处理，改由 flipContainer.scaleY 统一翻转
         // （这样 MapLibre 底图也跟着翻转，地图+HUD 元素一起镜像）
 
-        // 只画 HUD 覆盖元素
-        drawVehicleMarker(canvas, w, h)
+        // 车标已移至 MapLibre SymbolLayer（贴在路面上，3D 透视）
+        // 这里只画 HUD 覆盖元素（速度表等）
         drawSpeedometer(canvas, w, h)
 
         // OSM 归属标注（ODbL 协议要求）
