@@ -43,7 +43,8 @@ object RoadFetcher {
 
     private const val TAG = "RoadFetcher"
     private const val OVERPASS_URL = "https://overpass-api.de/api/interpreter"
-    private const val RADIUS = 3000
+    // v14.7.12: 增大查询半径到 6km，覆盖 3×3 区块网格（≈9km×9km 范围）
+    private const val RADIUS = 6000
     private const val MIN_INTERVAL_MS = 3000
 
     private var lastFetchTime = 0L
@@ -413,6 +414,6 @@ object RoadFetcher {
     }
 
     fun isCacheValid(lat: Double, lng: Double): Boolean {
-        return cachedSegments.isNotEmpty() && haversine(lat, lng, cacheCenterLat, cacheCenterLng) < 2500.0
+        return cachedSegments.isNotEmpty() && haversine(lat, lng, cacheCenterLat, cacheCenterLng) < 5000.0
     }
 }

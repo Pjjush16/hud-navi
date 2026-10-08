@@ -10,9 +10,9 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent">
 
-        <!-- MapLibre 矢量瓦片底图（OpenGL ES, 45° 倾斜） -->
-        <org.maplibre.android.maps.MapView
-            android:id="@+id/mapView"
+        <!-- v14.7.12: MapView 改为程序创建（TextureView 模式），此处留占位容器 -->
+        <FrameLayout
+            android:id="@+id/mapContainer"
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
 

@@ -61,6 +61,7 @@ import org.maplibre.android.camera.CameraPosition
 import org.maplibre.android.camera.CameraUpdateFactory
 import org.maplibre.android.geometry.LatLng
 import org.maplibre.android.maps.MapView
+import org.maplibre.android.maps.MapLibreMapOptions
 import org.maplibre.android.maps.Style
 import org.maplibre.android.style.layers.LineLayer
 import org.maplibre.android.style.layers.SymbolLayer
@@ -87,6 +88,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
     private lateinit var hudView: HudView
     private lateinit var mapView: MapView
+    private lateinit var mapContainer: FrameLayout  // v14.7.12: TextureView 模式容器
     private var maplibreStyleLoaded = false
     private lateinit var locationManager: LocationManager
     private lateinit var sensorManager: SensorManager
@@ -173,6 +175,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private var lastRoadFetchLat = 0.0
     private var lastRoadFetchLng = 0.0
     private var lastRoadFetchTime = 0L
+    // v14.7.12: Minecraft 风格区块预加载 — 追踪当前所在区块
+    private var currentChunkX = Int.MIN_VALUE
+    private var currentChunkZ = Int.MIN_VALUE
 
     // === 渲染循环 ===
     private var renderRunning = false
@@ -186,8 +191,11 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     companion object {
         private const val PERM_REQUEST = 100
         private const val TAG = "HudNavi"
-        // v10.11: 地图刷新优化 — 距离阈值降低，间隔增大，减少频繁刷新
-        private const val ROAD_FETCH_DIST = 500.0
+        // v14.7.12: Minecraft 风格区块系统 — 每个区块约 3km × 3km
+        // 进入新区块时预加载当前 + 周围 8 个区块（3×3 网格）
+        private const val CHUNK_SIZE_DEG = 0.03  // ≈ 3km（纬度方向）
+        // Overpass 查询半径 6km，覆盖 3×3 区块（对角线 ≈ 8.5km < 12km 直径）
+        private const val ROAD_FETCH_RADIUS = 6000
         private const val ROAD_FETCH_INTERVAL = 15000L
         private const val COMPASS_EMA_ALPHA = 0.08f
         private const val HEADING_DEAD_ZONE = 2.5f
@@ -254,8 +262,23 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         btnRetryPerm = findViewById(R.id.btnRetryPerm)
         hudView = findViewById(R.id.hudView)
 
-        // MapLibre MapView 初始化
-        mapView = findViewById(R.id.mapView)
+        // v14.7.12: MapLibre MapView 程序化创建（TextureView 模式）
+        // TextureView 是真正的 View 子类，完全参与 View 树合成
+        // 父容器的 scaleY = -1 镜像翻转对 TextureView 完美生效
+        // （GLSurfaceView 是独立 Surface，父容器 scaleY 不传播到 GL 渲染层）
+        mapContainer = findViewById(R.id.mapContainer)
+        val mapOptions = MapLibreMapOptions()
+        mapOptions.textureMode(true)  // 关键：使用 TextureView 而非 GLSurfaceView
+        mapOptions.camera(CameraPosition.Builder()
+            .tilt(HUD_TILT)
+            .zoom(19.5)
+            .build())
+        mapView = MapView(this, mapOptions)
+        mapContainer.addView(mapView, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        ))
+        Log.i(TAG, "MapView created with TextureView mode (scaleY mirror supported)")
         try {
             mapView.onCreate(savedInstanceState)
             Log.i(TAG, "mapView.onCreate() OK")
@@ -306,7 +329,8 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                     lineColor("#00BFFF")
                 ), "route-outline")
 
-                // 车标 SymbolLayer — 贴在路面上（MapLibre 3D 投影自动处理透视）
+                // v14.7.12: VIEWPORT 对齐 — 图标始终面向屏幕，不跟随地图旋转/倾斜
+                // 地图旋转时箭头永远朝屏幕顶部（上方），符合 HUD 直觉
                 val vehicleIconBitmap = createVehicleIconBitmap()
                 style.addImage("vehicle-icon", vehicleIconBitmap)
                 val vehiclePoint = Point.fromLngLat(0.0, 0.0)
@@ -318,9 +342,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                     iconSize(0.6f),
                     iconAllowOverlap(true),
                     iconIgnorePlacement(true),
-                    // MAP 对齐：图标贴在地图平面上，跟随 3D 透视倾斜（不再悬浮）
-                    // viewport 对齐 = 始终面向屏幕（悬浮感）；map 对齐 = 平铺在路面上
-                    iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_MAP),
+                    iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_VIEWPORT),
                     iconAnchor(Property.ICON_ANCHOR_CENTER)
                 ))
 
@@ -742,20 +764,26 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private fun tryFetchRoads() {
         if (targetLat == 0.0) return
         val now = System.currentTimeMillis()
-        // v10.11: 地图刷新逻辑优化 — 以路网缓存中心为基准
-        // 只有车辆移动到离缓存中心超过 ROAD_FETCH_DIST 时才刷新
-        // 避免因 GPS 抖动或缓慢移动频繁触发刷新
-        val distFromCenter = RoadFetcher.haversine(targetLat, targetLng, lastRoadFetchLat, lastRoadFetchLng)
+
+        // v14.7.12: Minecraft 风格区块预加载
+        // 将世界分成 ~3km × 3km 的区块
+        // 当用户进入新区块时，加载当前区块 + 周围 8 个区块（3×3 网格）
+        // 这样用户走到区块边缘时，相邻区块的路已经预加载好了
+        val chunkX = (targetLng / CHUNK_SIZE_DEG).toInt()
+        val chunkZ = (targetLat / CHUNK_SIZE_DEG).toInt()
+        val chunkChanged = chunkX != currentChunkX || chunkZ != currentChunkZ
         val timeSince = now - lastRoadFetchTime
 
-        // 条件1: 距离缓存中心超过阈值
-        // 条件2: 时间间隔已过 且 缓存不再有效（距离超过 800m 缓存边界）
-        val shouldFetch = (distFromCenter > ROAD_FETCH_DIST) ||
-            (timeSince > ROAD_FETCH_INTERVAL && !RoadFetcher.isCacheValid(targetLat, targetLng))
+        // 仅在进入新区块时触发加载（避免 GPS 抖动导致的频繁请求）
+        // 同时保留时间间隔保护（至少 15 秒间隔）
+        val shouldFetch = chunkChanged && timeSince > ROAD_FETCH_INTERVAL
 
         if (shouldFetch) {
+            currentChunkX = chunkX; currentChunkZ = chunkZ
             lastRoadFetchLat = targetLat; lastRoadFetchLng = targetLng
             lastRoadFetchTime = now
+
+            Log.i(TAG, "Chunk changed: ($currentChunkX, $currentChunkZ) → fetching 3×3 grid (radius=${ROAD_FETCH_RADIUS}m)")
 
             roadFetchJob?.cancel()
             roadFetchJob = scope.launch {
@@ -764,7 +792,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 if (result.needRerender) {
                     hudView.setRoads(result.segments, targetLat, targetLng)
                     RoadFetcher.markRendered()
-                    Log.i(TAG, "Roads updated: ${result.segments.size} segments (data changed)")
+                    Log.i(TAG, "Roads updated: ${result.segments.size} segments (chunk (${chunkX},${chunkZ}))")
                 } else {
                     Log.i(TAG, "Roads unchanged (hash match), skip rerender")
                 }
@@ -1221,17 +1249,17 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             map.style?.getSourceAs<GeoJsonSource>("vehicle-position")
                 ?.setGeoJson(FeatureCollection.fromFeatures(listOf(vehicleFeature)))
 
-            // 车标反向旋转：抵消相机 bearing，使箭头始终朝上（屏幕顶部）
-            // MAP 对齐保留 3D 倾斜效果，iconRotate 只控制图标在地图平面上的自转
+            // v14.7.12: VIEWPORT 对齐 — 车标始终面向屏幕，地图旋转时箭头永远朝上
+            // 不需要 iconRotate 反向补偿（VIEWPORT 模式自动处理）
             val carLayer = map.style?.getLayerAs<SymbolLayer>("vehicle-marker")
             carLayer?.setProperties(
                 iconImage("vehicle-icon"),
                 iconSize(0.6f),
                 iconAllowOverlap(true),
                 iconIgnorePlacement(true),
-                iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_MAP),
+                iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_VIEWPORT),
                 iconAnchor(Property.ICON_ANCHOR_CENTER),
-                iconRotate(-vehicleBearing)
+                iconRotate(0f)
             )
         }
     }
