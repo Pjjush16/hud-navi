@@ -329,8 +329,8 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                     lineColor("#00BFFF")
                 ), "route-outline")
 
-                // v14.7.12: VIEWPORT 对齐 — 图标始终面向屏幕，不跟随地图旋转/倾斜
-                // 地图旋转时箭头永远朝屏幕顶部（上方），符合 HUD 直觉
+                // v14.7.13: MAP 对齐 — 车标跟随地图 pitch/bearing 旋转，拥有 3D 透视感
+                // 车标箭头朝上(0°)，iconRotate 补偿车辆航向与地图 bearing 差值
                 val vehicleIconBitmap = createVehicleIconBitmap()
                 style.addImage("vehicle-icon", vehicleIconBitmap)
                 val vehiclePoint = Point.fromLngLat(0.0, 0.0)
@@ -342,7 +342,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                     iconSize(0.6f),
                     iconAllowOverlap(true),
                     iconIgnorePlacement(true),
-                    iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_VIEWPORT),
+                    iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_MAP),
                     iconAnchor(Property.ICON_ANCHOR_CENTER)
                 ))
 
@@ -1249,17 +1249,19 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             map.style?.getSourceAs<GeoJsonSource>("vehicle-position")
                 ?.setGeoJson(FeatureCollection.fromFeatures(listOf(vehicleFeature)))
 
-            // v14.7.12: VIEWPORT 对齐 — 车标始终面向屏幕，地图旋转时箭头永远朝上
-            // 不需要 iconRotate 反向补偿（VIEWPORT 模式自动处理）
+            // v14.7.13: MAP 对齐 — 车标拥有 3D 透视，跟随地图 pitch/bearing 旋转
+            // iconRotate 补偿车辆航向与地图 bearing 的差值，确保箭头始终指向行驶方向
+            val mapBearing = map.cameraPosition.bearing.toFloat()
+            val iconRotateAngle = vehicleBearing - mapBearing
             val carLayer = map.style?.getLayerAs<SymbolLayer>("vehicle-marker")
             carLayer?.setProperties(
                 iconImage("vehicle-icon"),
                 iconSize(0.6f),
                 iconAllowOverlap(true),
                 iconIgnorePlacement(true),
-                iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_VIEWPORT),
+                iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_MAP),
                 iconAnchor(Property.ICON_ANCHOR_CENTER),
-                iconRotate(0f)
+                iconRotate(iconRotateAngle)
             )
         }
     }
