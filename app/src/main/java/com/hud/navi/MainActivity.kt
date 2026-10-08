@@ -241,11 +241,11 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         setContentView(R.layout.activity_main)
 
         flipContainer = findViewById(R.id.flipContainer)
-        // 初始化时设置镜像状态（默认 mirrorEnabled=true，翻转整个容器+MapView+HudView）
+        // 初始化时设置镜像状态（默认 mirrorEnabled=true，翻转整个容器）
         flipContainer.post {
             try {
-                val mirror = ::hudView.isInitialized && hudView.mirrorEnabled
-                applyMirror(mirror)
+                flipContainer.pivotY = flipContainer.height / 2f
+                flipContainer.scaleY = if (::hudView.isInitialized && hudView.mirrorEnabled) -1f else 1f
             } catch (e: Exception) {
                 Log.w(TAG, "flipContainer init error: ${e.message}")
             }
@@ -318,16 +318,13 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                     iconSize(0.6f),
                     iconAllowOverlap(true),
                     iconIgnorePlacement(true),
-                    // v14.7.12: VIEWPORT 对齐 — 图标始终面向屏幕，不跟随地图旋转/倾斜
-                    // 地图旋转时图标保持朝上（屏幕顶部），不再需要手动 iconRotate 反向补偿
-                    iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_VIEWPORT),
+                    // MAP 对齐：图标贴在地图平面上，跟随 3D 透视倾斜（不再悬浮）
+                    // viewport 对齐 = 始终面向屏幕（悬浮感）；map 对齐 = 平铺在路面上
+                    iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_MAP),
                     iconAnchor(Property.ICON_ANCHOR_CENTER)
                 ))
 
                 Log.i(TAG, "MapLibre style loaded (HUD dark, tilt=75° pitch=-15°, z=3m, FOV≈50°)")
-
-                // v14.7.12: style 加载后重新应用镜像（GLSurfaceView 可能在 style load 时重建 Surface）
-                handler.post { applyMirror(hudView.mirrorEnabled) }
             }
           } catch (e: Exception) {
             Log.e(TAG, "MapLibre getMapAsync FAILED: ${e.message}", e)
@@ -365,10 +362,14 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
         gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onDoubleTap(e: MotionEvent): Boolean {
-                applyMirror(!hudView.mirrorEnabled)
+                hudView.mirrorEnabled = !hudView.mirrorEnabled
+                // 翻转整个 flipContainer（MapView + HudView 一起翻转）
+                flipContainer.pivotY = flipContainer.height / 2f
+                flipContainer.scaleY = if (hudView.mirrorEnabled) -1f else 1f
                 updateWakeFeedbackMirror()
                 val state = if (hudView.mirrorEnabled) "镜像 ON" else "镜像 OFF"
                 Toast.makeText(this@MainActivity, state, Toast.LENGTH_SHORT).show()
+                Log.i(TAG, "Mirror toggled: ${hudView.mirrorEnabled}")
                 return true
             }
         })
@@ -401,15 +402,21 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             override fun onMapZoomOut() { handler.post { hudView.zoomOffset = (hudView.zoomOffset - 1.0f).coerceAtLeast(-3.0f); hudView.invalidate() } }
             override fun onMapZoomReset() { handler.post { hudView.zoomOffset = 0f; hudView.invalidate() } }
             override fun onMirrorToggle() { handler.post {
-                applyMirror(!hudView.mirrorEnabled)
+                hudView.mirrorEnabled = !hudView.mirrorEnabled
+                flipContainer.pivotY = flipContainer.height / 2f
+                flipContainer.scaleY = if (hudView.mirrorEnabled) -1f else 1f
                 updateWakeFeedbackMirror()
             } }
             override fun onMirrorOn() { handler.post {
-                applyMirror(true)
+                hudView.mirrorEnabled = true
+                flipContainer.pivotY = flipContainer.height / 2f
+                flipContainer.scaleY = -1f
                 updateWakeFeedbackMirror()
             } }
             override fun onMirrorOff() { handler.post {
-                applyMirror(false)
+                hudView.mirrorEnabled = false
+                flipContainer.pivotY = flipContainer.height / 2f
+                flipContainer.scaleY = 1f
                 updateWakeFeedbackMirror()
             } }
             override fun onNavigateTo(lat: Double, lng: Double, name: String) {
@@ -522,11 +529,15 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private fun handleUiCommand(command: String) {
         when {
             command == "MIRROR_TOGGLE" -> {
-                applyMirror(!hudView.mirrorEnabled)
+                hudView.mirrorEnabled = !hudView.mirrorEnabled
+                flipContainer.pivotY = flipContainer.height / 2f
+                flipContainer.scaleY = if (hudView.mirrorEnabled) -1f else 1f
                 updateWakeFeedbackMirror()
             }
             command == "MIRROR_OFF" -> {
-                applyMirror(false)
+                hudView.mirrorEnabled = false
+                flipContainer.pivotY = flipContainer.height / 2f
+                flipContainer.scaleY = 1f
                 updateWakeFeedbackMirror()
             }
             command == "MAP_ZOOM_IN" -> {
@@ -1150,26 +1161,6 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     }
 
     /**
-     * v14.7.12: 统一应用镜像翻转
-     * MapLibre MapView 内部是 GLSurfaceView，父容器的 scaleY 不一定传播到 GL Surface
-     * 所以同时对 flipContainer、mapView、hudView 三者都设置 scaleY
-     */
-    private fun applyMirror(enabled: Boolean) {
-        val sy = if (enabled) -1f else 1f
-        // 容器
-        flipContainer.pivotY = flipContainer.height / 2f
-        flipContainer.scaleY = sy
-        // MapView（GLSurfaceView）— 直接设置确保 GL 渲染也翻转
-        mapView.pivotY = mapView.height / 2f
-        mapView.scaleY = sy
-        // HudView
-        hudView.pivotY = hudView.height / 2f
-        hudView.scaleY = sy
-        hudView.mirrorEnabled = enabled
-        Log.i(TAG, "applyMirror($enabled): container=${flipContainer.scaleY}, map=${mapView.scaleY}, hud=${hudView.scaleY}")
-    }
-
-    /**
      * 镜像模式切换时更新唤醒反馈面板位置
      * 不再使用 scaleY 翻转（会破坏 translationY 动画），
      * 改为动态 gravity：镜像时面板在顶部，正常时在底部
@@ -1230,17 +1221,17 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             map.style?.getSourceAs<GeoJsonSource>("vehicle-position")
                 ?.setGeoJson(FeatureCollection.fromFeatures(listOf(vehicleFeature)))
 
-            // v14.7.12: VIEWPORT 对齐 — 图标锁定在屏幕坐标系，不随地图 bearing/tilt 旋转
-            // 地图转了但图标永远朝上，不需要 iconRotate 反向补偿
+            // 车标反向旋转：抵消相机 bearing，使箭头始终朝上（屏幕顶部）
+            // MAP 对齐保留 3D 倾斜效果，iconRotate 只控制图标在地图平面上的自转
             val carLayer = map.style?.getLayerAs<SymbolLayer>("vehicle-marker")
             carLayer?.setProperties(
                 iconImage("vehicle-icon"),
                 iconSize(0.6f),
                 iconAllowOverlap(true),
                 iconIgnorePlacement(true),
-                iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_VIEWPORT),
+                iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_MAP),
                 iconAnchor(Property.ICON_ANCHOR_CENTER),
-                iconRotate(0f)
+                iconRotate(-vehicleBearing)
             )
         }
     }
