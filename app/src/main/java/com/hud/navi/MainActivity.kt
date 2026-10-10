@@ -1258,8 +1258,10 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             map.style?.getSourceAs<GeoJsonSource>("vehicle-position")
                 ?.setGeoJson(FeatureCollection.fromFeatures(listOf(vehicleFeature)))
 
-            // v14.7.14: VIEWPORT 对齐 — 图标锁定到屏幕坐标系，箭头永远朝上
-            // 地图在车标下方旋转，车标始终固定在屏幕中央偏下位置朝上
+            // v14.7.15: 双层对齐 — 图标"贴在地图上"且"永远朝上"
+            // iconPitchAlignment=MAP: 图标躺在地图3D倾斜面上（透视变形，贴在路面上）
+            // iconRotationAlignment=VIEWPORT: 图标X轴对齐屏幕X轴，箭头永远朝屏幕上方
+            // 两者配合：地图倾斜旋转时图标有3D透视感，但箭头始终朝上
             // 这是 Google Maps / Waze / 高德等主流导航应用的标准做法
             val carLayer = map.style?.getLayerAs<SymbolLayer>("vehicle-marker")
             carLayer?.setProperties(
@@ -1267,6 +1269,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 iconSize(0.6f),
                 iconAllowOverlap(true),
                 iconIgnorePlacement(true),
+                iconPitchAlignment(Property.ICON_PITCH_ALIGNMENT_MAP),
                 iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_VIEWPORT),
                 iconAnchor(Property.ICON_ANCHOR_CENTER),
                 iconRotate(0f)
