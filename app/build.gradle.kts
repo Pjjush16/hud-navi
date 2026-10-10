@@ -11,8 +11,8 @@ android {
         applicationId = "com.hud.navi"
         minSdk = 24  // ONNX Runtime 1.18 requires API 24+
         targetSdk = 34
-        versionCode = 96
-        versionName = "14.7.16"
+        versionCode = 97
+        versionName = "14.7.17"
     }
 
     // ABI 分包

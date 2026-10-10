@@ -346,7 +346,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                     iconAnchor(Property.ICON_ANCHOR_CENTER)
                 ))
 
-                Log.i(TAG, "MapLibre style loaded (HUD dark, tilt=75° pitch=-15°, z=3m, FOV≈50°)")
+                Log.i(TAG, "MapLibre style loaded (HUD dark, tilt=60°, target+20m ahead, roof-cam)")
             }
           } catch (e: Exception) {
             Log.e(TAG, "MapLibre getMapAsync FAILED: ${e.message}", e)
@@ -1231,15 +1231,22 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         val drawLng = if (hudView.isSnapped) hudView.snappedLng else vehicleLng
         val dynamicZoom = hudView.getDynamicZoom(hudView.vehicleSpeed)
 
-        // v14.7.16: 用 padding 把车辆推到屏幕下方 75% 位置
-        // 相机 target 仍在车辆坐标上，但 padding 让车辆偏下 → 相机等效于"在车后方 5m 处"
-        // 这是导航应用标准做法：车辆贴在屏幕底部，前方路面占满整个屏幕
+        // v14.7.17: "趴在车顶"视角 — 相机贴着车顶往前看
+        // 把相机 target 向车辆前方偏移 20m，相机自然落在车后方 → 镜头感觉贴着车顶
+        // 底部 padding 减小到 20%，只让车头/车标露出在屏幕最下方
+        val forwardMeters = 20.0
+        val bearingRad = Math.toRadians(vehicleBearing.toDouble())
+        val offsetLat = forwardMeters * Math.cos(bearingRad) / 111_320.0
+        val offsetLng = forwardMeters * Math.sin(bearingRad) / (111_320.0 * Math.cos(Math.toRadians(drawLat)))
+        val targetLat = drawLat + offsetLat
+        val targetLng = drawLng + offsetLng
+
         val screenHeight = mapView.height.toFloat()
-        val bottomPadding = (screenHeight * 0.70).toDouble()
+        val bottomPadding = (screenHeight * 0.20).toDouble()
 
         val cameraUpdate = CameraUpdateFactory.newCameraPosition(
             CameraPosition.Builder()
-                .target(LatLng(drawLat, drawLng))
+                .target(LatLng(targetLat, targetLng))
                 .bearing(vehicleBearing.toDouble())
                 .tilt(HUD_TILT)
                 .zoom(dynamicZoom.toDouble())
