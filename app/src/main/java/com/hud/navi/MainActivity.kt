@@ -1224,6 +1224,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     // 这是最接近驾驶员视角的最大倾角
     private val HUD_TILT = 60.0
 
+    // v14.7.14: 相机距车辆 5 米（沿行驶方向反方向偏移）
+    private val CAMERA_OFFSET_METERS = 5.0
+
     private fun updateMapLibreCamera() {
         if (!maplibreStyleLoaded || vehicleLat == 0.0) return
 
@@ -1231,9 +1234,15 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         val drawLng = if (hudView.isSnapped) hudView.snappedLng else vehicleLng
         val dynamicZoom = hudView.getDynamicZoom(hudView.vehicleSpeed)
 
+        // v14.7.14: 将相机 target 向车辆后方偏移 5m，使镜头位于车后约 5m 处
+        val bearingRad = Math.toRadians(vehicleBearing.toDouble())
+        val offsetLat = -(CAMERA_OFFSET_METERS / 111320.0) * Math.cos(bearingRad)
+        val offsetLng = -(CAMERA_OFFSET_METERS / (111320.0 * Math.cos(Math.toRadians(drawLat)))) * Math.sin(bearingRad)
+        val cameraTarget = LatLng(drawLat + offsetLat, drawLng + offsetLng)
+
         val cameraUpdate = CameraUpdateFactory.newCameraPosition(
             CameraPosition.Builder()
-                .target(LatLng(drawLat, drawLng))
+                .target(cameraTarget)
                 .bearing(vehicleBearing.toDouble())
                 .tilt(HUD_TILT)
                 .zoom(dynamicZoom.toDouble())
@@ -1249,19 +1258,18 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             map.style?.getSourceAs<GeoJsonSource>("vehicle-position")
                 ?.setGeoJson(FeatureCollection.fromFeatures(listOf(vehicleFeature)))
 
-            // v14.7.13: MAP 对齐 — 车标拥有 3D 透视，跟随地图 pitch/bearing 旋转
-            // iconRotate 补偿车辆航向与地图 bearing 的差值，确保箭头始终指向行驶方向
-            val mapBearing = map.cameraPosition.bearing.toFloat()
-            val iconRotateAngle = vehicleBearing - mapBearing
+            // v14.7.14: VIEWPORT 对齐 — 图标锁定到屏幕坐标系，箭头永远朝上
+            // 地图在车标下方旋转，车标始终固定在屏幕中央偏下位置朝上
+            // 这是 Google Maps / Waze / 高德等主流导航应用的标准做法
             val carLayer = map.style?.getLayerAs<SymbolLayer>("vehicle-marker")
             carLayer?.setProperties(
                 iconImage("vehicle-icon"),
                 iconSize(0.6f),
                 iconAllowOverlap(true),
                 iconIgnorePlacement(true),
-                iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_MAP),
+                iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_VIEWPORT),
                 iconAnchor(Property.ICON_ANCHOR_CENTER),
-                iconRotate(iconRotateAngle)
+                iconRotate(0f)
             )
         }
     }
