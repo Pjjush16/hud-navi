@@ -1224,9 +1224,6 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     // 这是最接近驾驶员视角的最大倾角
     private val HUD_TILT = 60.0
 
-    // v14.7.14: 相机距车辆 5 米（沿行驶方向反方向偏移）
-    private val CAMERA_OFFSET_METERS = 5.0
-
     private fun updateMapLibreCamera() {
         if (!maplibreStyleLoaded || vehicleLat == 0.0) return
 
@@ -1234,18 +1231,19 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         val drawLng = if (hudView.isSnapped) hudView.snappedLng else vehicleLng
         val dynamicZoom = hudView.getDynamicZoom(hudView.vehicleSpeed)
 
-        // v14.7.14: 将相机 target 向车辆后方偏移 5m，使镜头位于车后约 5m 处
-        val bearingRad = Math.toRadians(vehicleBearing.toDouble())
-        val offsetLat = -(CAMERA_OFFSET_METERS / 111320.0) * Math.cos(bearingRad)
-        val offsetLng = -(CAMERA_OFFSET_METERS / (111320.0 * Math.cos(Math.toRadians(drawLat)))) * Math.sin(bearingRad)
-        val cameraTarget = LatLng(drawLat + offsetLat, drawLng + offsetLng)
+        // v14.7.16: 用 padding 把车辆推到屏幕下方 75% 位置
+        // 相机 target 仍在车辆坐标上，但 padding 让车辆偏下 → 相机等效于"在车后方 5m 处"
+        // 这是导航应用标准做法：车辆贴在屏幕底部，前方路面占满整个屏幕
+        val screenHeight = mapView.height.toFloat()
+        val bottomPadding = (screenHeight * 0.70).toDouble()
 
         val cameraUpdate = CameraUpdateFactory.newCameraPosition(
             CameraPosition.Builder()
-                .target(cameraTarget)
+                .target(LatLng(drawLat, drawLng))
                 .bearing(vehicleBearing.toDouble())
                 .tilt(HUD_TILT)
                 .zoom(dynamicZoom.toDouble())
+                .padding(doubleArrayOf(0.0, 0.0, bottomPadding, 0.0))
                 .build()
         )
         // animateCamera 太慢（300ms），用 easeCamera 快速跟随
