@@ -10,13 +10,7 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent">
 
-        <!-- v14.7.12: MapView 改为程序创建（TextureView 模式），此处留占位容器 -->
-        <FrameLayout
-            android:id="@+id/mapContainer"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent" />
-
-        <!-- HUD 覆盖层（透明背景，只画车速/车标/导航信息） -->
+        <!-- v15.0: 自研 Canvas 2D 地图渲染引擎（路网+车辆+路线+速度） -->
         <com.hud.navi.HudView
             android:id="@+id/hudView"
             android:layout_width="match_parent"

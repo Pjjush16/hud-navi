@@ -55,25 +55,7 @@ import kotlinx.coroutines.launch
 import kotlin.math.*
 import java.io.File
 
-// MapLibre GL Native: 矢量瓦片 + OpenGL ES 渲染
-import org.maplibre.android.MapLibre
-import org.maplibre.android.camera.CameraPosition
-import org.maplibre.android.camera.CameraUpdateFactory
-import org.maplibre.android.geometry.LatLng
-import org.maplibre.android.maps.MapView
-import org.maplibre.android.maps.MapLibreMapOptions
-import org.maplibre.android.maps.Style
-import org.maplibre.android.style.layers.LineLayer
-import org.maplibre.android.style.layers.SymbolLayer
-import android.graphics.Bitmap
-
-import org.maplibre.android.style.layers.Property
-import org.maplibre.android.style.layers.PropertyFactory.*
-import org.maplibre.android.style.sources.GeoJsonSource
-import org.maplibre.geojson.Feature
-import org.maplibre.geojson.FeatureCollection
-import org.maplibre.geojson.LineString
-import org.maplibre.geojson.Point
+// v15.0: MapLibre 已移除，使用自研 Canvas 2D 渲染引擎
 
 /**
  * HUD 导航 v9.0 — 回滚地图绘制到气压计之前
@@ -87,9 +69,6 @@ import org.maplibre.geojson.Point
 class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener {
 
     private lateinit var hudView: HudView
-    private lateinit var mapView: MapView
-    private lateinit var mapContainer: FrameLayout  // v14.7.12: TextureView 模式容器
-    private var maplibreStyleLoaded = false
     private lateinit var locationManager: LocationManager
     private lateinit var sensorManager: SensorManager
     private val handler = Handler(Looper.getMainLooper())
@@ -238,14 +217,6 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             // 不终止进程 — 让系统默认处理器处理（会显示崩溃对话框但保留日志）
         }
 
-        // MapLibre 初始化（必须在 setContentView 之前）
-        try {
-            MapLibre.getInstance(this)
-            Log.i(TAG, "MapLibre.getInstance() OK")
-        } catch (e: Exception) {
-            Log.e(TAG, "MapLibre.getInstance() FAILED: ${e.message}", e)
-        }
-
         setContentView(R.layout.activity_main)
 
         flipContainer = findViewById(R.id.flipContainer)
@@ -262,101 +233,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         btnRetryPerm = findViewById(R.id.btnRetryPerm)
         hudView = findViewById(R.id.hudView)
 
-        // v14.7.12: MapLibre MapView 程序化创建（TextureView 模式）
-        // TextureView 是真正的 View 子类，完全参与 View 树合成
-        // 父容器的 scaleY = -1 镜像翻转对 TextureView 完美生效
-        // （GLSurfaceView 是独立 Surface，父容器 scaleY 不传播到 GL 渲染层）
-        mapContainer = findViewById(R.id.mapContainer)
-        val mapOptions = MapLibreMapOptions()
-        mapOptions.textureMode(true)  // 关键：使用 TextureView 而非 GLSurfaceView
-        mapOptions.camera(CameraPosition.Builder()
-            .tilt(HUD_TILT)
-            .zoom(19.5)
-            .build())
-        mapView = MapView(this, mapOptions)
-        mapContainer.addView(mapView, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT,
-            FrameLayout.LayoutParams.MATCH_PARENT
-        ))
-        Log.i(TAG, "MapView created with TextureView mode (scaleY mirror supported)")
-        try {
-            mapView.onCreate(savedInstanceState)
-            Log.i(TAG, "mapView.onCreate() OK")
-        } catch (e: Exception) {
-            Log.e(TAG, "mapView.onCreate() FAILED: ${e.message}", e)
-        }
-        mapView.getMapAsync { map ->
-          try {
-            // 加载 HUD 暗色样式（assets 中的 JSON）
-            map.setStyle(Style.Builder().fromUri("asset://hud_dark_style.json")) { style ->
-                maplibreStyleLoaded = true
-
-                // 初始相机位置：模拟驾驶员视角
-                // MapLibre 最大 tilt 60°（硬限制），这是最接近驾驶员视角的最大倾角
-                // Z 轴 3m 眼高 → zoom ≈ 19.5（基准值，动态缩放由此加减）
-                // FOV 50° 通过 zoom 间接模拟
-                map.cameraPosition = CameraPosition.Builder()
-                    .tilt(HUD_TILT)
-                    .zoom(19.5)
-                    .build()
-
-                // 禁用 MapLibre 内置 logo 和归因（我们用自定义的）
-                map.uiSettings.isLogoEnabled = false
-                map.uiSettings.isAttributionEnabled = false
-                map.uiSettings.isCompassEnabled = false
-
-                // 禁用用户手势（HUD 模式下不需要手动操作地图）
-                map.uiSettings.isScrollGesturesEnabled = false
-                map.uiSettings.isZoomGesturesEnabled = false
-                map.uiSettings.isRotateGesturesEnabled = false
-                map.uiSettings.isTiltGesturesEnabled = false
-
-                // 添加导航路线 GeoJSON Source（空初始）
-                val emptyCollection = FeatureCollection.fromFeatures(emptyList())
-                style.addSource(GeoJsonSource("navigation-route", emptyCollection))
-
-                // 导航路线图层：深蓝轮廓 + 亮蓝路线
-                style.addLayer(LineLayer("route-outline", "navigation-route").withProperties(
-                    lineCap(Property.LINE_CAP_ROUND),
-                    lineJoin(Property.LINE_JOIN_ROUND),
-                    lineWidth(8f),
-                    lineColor("#003366")
-                ))
-                style.addLayerAbove(LineLayer("route-line", "navigation-route").withProperties(
-                    lineCap(Property.LINE_CAP_ROUND),
-                    lineJoin(Property.LINE_JOIN_ROUND),
-                    lineWidth(4f),
-                    lineColor("#00BFFF")
-                ), "route-outline")
-
-                // v14.7.13: MAP 对齐 — 车标跟随地图 pitch/bearing 旋转，拥有 3D 透视感
-                // 车标箭头朝上(0°)，iconRotate 补偿车辆航向与地图 bearing 差值
-                val vehicleIconBitmap = createVehicleIconBitmap()
-                style.addImage("vehicle-icon", vehicleIconBitmap)
-                val vehiclePoint = Point.fromLngLat(0.0, 0.0)
-                val vehicleFeature = Feature.fromGeometry(vehiclePoint)
-                style.addSource(GeoJsonSource("vehicle-position",
-                    FeatureCollection.fromFeatures(listOf(vehicleFeature))))
-                style.addLayer(SymbolLayer("vehicle-marker", "vehicle-position").withProperties(
-                    iconImage("vehicle-icon"),
-                    iconSize(0.6f),
-                    iconAllowOverlap(true),
-                    iconIgnorePlacement(true),
-                    iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_MAP),
-                    iconAnchor(Property.ICON_ANCHOR_CENTER)
-                ))
-
-                Log.i(TAG, "MapLibre style loaded (HUD dark, tilt=60°, target+20m ahead, roof-cam)")
-            }
-          } catch (e: Exception) {
-            Log.e(TAG, "MapLibre getMapAsync FAILED: ${e.message}", e)
-          }
-        }
-
-        // 路线变更回调：更新 MapLibre GeoJSON
-        hudView.onRouteChanged = { route ->
-            updateMapLibreRoute(route)
-        }
+        // v15.0: 自研 Canvas 2D 渲染引擎，无需 MapLibre
 
         // 唤醒反馈 UI
         wakeFeedback = findViewById(R.id.wakeFeedback)
@@ -385,7 +262,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onDoubleTap(e: MotionEvent): Boolean {
                 hudView.mirrorEnabled = !hudView.mirrorEnabled
-                // 翻转整个 flipContainer（MapView + HudView 一起翻转）
+                // 翻转整个 flipContainer（HudView 地图+HUD一起翻转）
                 flipContainer.pivotY = flipContainer.height / 2f
                 flipContainer.scaleY = if (hudView.mirrorEnabled) -1f else 1f
                 updateWakeFeedbackMirror()
@@ -928,9 +805,6 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         // v15.0: 路口场景用 EKF 的绘制速度（GPS 平滑速度）
         hudView.vehicleSpeed = (ekf.speed * 3.6).toFloat()
 
-        // v14.0: MapLibre 相机跟随（45° 倾斜 + 车头方向 + 动态缩放）
-        updateMapLibreCamera()
-
         hudView.invalidate()
     }
 
@@ -1091,7 +965,6 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
     override fun onResume() {
         super.onResume()
-        mapView.onResume()
         startRenderLoop()
         startHudForegroundService()
         if (wakeWordEnabled) {
@@ -1102,41 +975,19 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     override fun onPause() {
         stopRenderLoop()
         voicePipeline?.pause()
-        mapView.onPause()
         super.onPause()
-    }
-
-    override fun onStart() {
-        super.onStart()
-        mapView.onStart()
-    }
-
-    override fun onStop() {
-        mapView.onStop()
-        super.onStop()
     }
 
     override fun onDestroy() {
         stopRenderLoop()
         voicePipeline?.release()
         apiServer?.stopServer()
-        mapView.onDestroy()
         locationManager.removeUpdates(this)
         sensorManager.unregisterListener(this)
         handler.removeCallbacksAndMessages(null)
         roadFetchJob?.cancel(); scope.cancel()
         stopService(Intent(this, HudForegroundService::class.java))
         super.onDestroy()
-    }
-
-    override fun onSaveInstanceState(outState: Bundle) {
-        super.onSaveInstanceState(outState)
-        mapView.onSaveInstanceState(outState)
-    }
-
-    override fun onLowMemory() {
-        super.onLowMemory()
-        mapView.onLowMemory()
     }
 
     /**
@@ -1217,121 +1068,5 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         return dp * resources.displayMetrics.density
     }
 
-    // === MapLibre 相机更新（每帧调用） ===
-    // 摄像机参数：Z=3m眼高, Pitch=-15°, FOV=50°
-    // 摄像机参数：Z=3m眼高, Pitch=-15°, FOV=50°
-    // MapLibre Native 最大 tilt 60°（硬限制），60° ≈ pitch -30°（从水平面算）
-    // 这是最接近驾驶员视角的最大倾角
-    private val HUD_TILT = 60.0
-
-    private fun updateMapLibreCamera() {
-        if (!maplibreStyleLoaded || vehicleLat == 0.0) return
-
-        val drawLat = if (hudView.isSnapped) hudView.snappedLat else vehicleLat
-        val drawLng = if (hudView.isSnapped) hudView.snappedLng else vehicleLng
-        val dynamicZoom = hudView.getDynamicZoom(hudView.vehicleSpeed)
-
-        // v14.7.17: "趴在车顶"视角 — 相机贴着车顶往前看
-        // 把相机 target 向车辆前方偏移 20m，相机自然落在车后方 → 镜头感觉贴着车顶
-        // 底部 padding 减小到 20%，只让车头/车标露出在屏幕最下方
-        val forwardMeters = 20.0
-        val bearingRad = Math.toRadians(vehicleBearing.toDouble())
-        val offsetLat = forwardMeters * Math.cos(bearingRad) / 111_320.0
-        val offsetLng = forwardMeters * Math.sin(bearingRad) / (111_320.0 * Math.cos(Math.toRadians(drawLat)))
-        val targetLat = drawLat + offsetLat
-        val targetLng = drawLng + offsetLng
-
-        val screenHeight = mapView.height.toFloat()
-        val bottomPadding = (screenHeight * 0.20).toDouble()
-
-        val cameraUpdate = CameraUpdateFactory.newCameraPosition(
-            CameraPosition.Builder()
-                .target(LatLng(targetLat, targetLng))
-                .bearing(vehicleBearing.toDouble())
-                .tilt(HUD_TILT)
-                .zoom(dynamicZoom.toDouble())
-                .padding(doubleArrayOf(0.0, 0.0, bottomPadding, 0.0))
-                .build()
-        )
-        // animateCamera 太慢（300ms），用 easeCamera 快速跟随
-        mapView.getMapAsync { map ->
-            map.easeCamera(cameraUpdate, 100, false, null)
-
-            // 更新车标位置 — 车标贴在路面上，由 MapLibre 3D 投影处理透视
-            val vehiclePoint = Point.fromLngLat(drawLng, drawLat)
-            val vehicleFeature = Feature.fromGeometry(vehiclePoint)
-            map.style?.getSourceAs<GeoJsonSource>("vehicle-position")
-                ?.setGeoJson(FeatureCollection.fromFeatures(listOf(vehicleFeature)))
-
-            // v14.7.15: 双层对齐 — 图标"贴在地图上"且"永远朝上"
-            // iconPitchAlignment=MAP: 图标躺在地图3D倾斜面上（透视变形，贴在路面上）
-            // iconRotationAlignment=VIEWPORT: 图标X轴对齐屏幕X轴，箭头永远朝屏幕上方
-            // 两者配合：地图倾斜旋转时图标有3D透视感，但箭头始终朝上
-            // 这是 Google Maps / Waze / 高德等主流导航应用的标准做法
-            val carLayer = map.style?.getLayerAs<SymbolLayer>("vehicle-marker")
-            carLayer?.setProperties(
-                iconImage("vehicle-icon"),
-                iconSize(0.6f),
-                iconAllowOverlap(true),
-                iconIgnorePlacement(true),
-                iconPitchAlignment(Property.ICON_PITCH_ALIGNMENT_MAP),
-                iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_VIEWPORT),
-                iconAnchor(Property.ICON_ANCHOR_CENTER),
-                iconRotate(0f)
-            )
-        }
-    }
-
-    // === 生成车标图标（蓝色圆 + 白色 chevron 箭头） ===
-    private fun createVehicleIconBitmap(): Bitmap {
-        val size = 128
-        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        val canvas = android.graphics.Canvas(bmp)
-        val cx = size / 2f
-        val cy = size / 2f
-
-        // 白色外圈
-        val whiteBorder = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-            color = android.graphics.Color.WHITE
-            style = android.graphics.Paint.Style.FILL
-        }
-        canvas.drawCircle(cx, cy, size * 0.48f, whiteBorder)
-
-        // 蓝色内圆
-        val blueFill = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-            color = android.graphics.Color.parseColor("#2196F3")
-            style = android.graphics.Paint.Style.FILL
-        }
-        canvas.drawCircle(cx, cy, size * 0.42f, blueFill)
-
-        // 白色 chevron 箭头（朝上）
-        val arrowPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-            color = android.graphics.Color.WHITE
-            style = android.graphics.Paint.Style.FILL
-        }
-        val arrowPath = android.graphics.Path().apply {
-            moveTo(cx, cy - size * 0.25f)           // 尖端（上）
-            lineTo(cx - size * 0.2f, cy + size * 0.2f)  // 左肩
-            lineTo(cx, cy + size * 0.02f)             // 中凹
-            lineTo(cx + size * 0.2f, cy + size * 0.2f)  // 右肩
-            close()
-        }
-        canvas.drawPath(arrowPath, arrowPaint)
-
-        return bmp
-    }
-
-    // === MapLibre 路线更新（GeoJSON） ===
-    private fun updateMapLibreRoute(route: List<Pair<Double, Double>>) {
-        if (!maplibreStyleLoaded || route.isEmpty()) return
-
-        val points = route.map { (lat, lng) -> Point.fromLngLat(lng, lat) }
-        val lineString = LineString.fromLngLats(points)
-        val feature = Feature.fromGeometry(lineString)
-        val featureCollection = FeatureCollection.fromFeatures(listOf(feature))
-
-        mapView.getMapAsync { map ->
-            map.style?.getSourceAs<GeoJsonSource>("navigation-route")?.setGeoJson(featureCollection)
-        }
-    }
+    // v15.0: MapLibre 已移除，地图渲染由 HudView Canvas 2D 引擎处理
 }
