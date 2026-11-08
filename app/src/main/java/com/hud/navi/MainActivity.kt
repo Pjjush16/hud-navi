@@ -291,9 +291,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
         // v13.14: 初始化 HTTP API 服务器
         apiServer = ApiServer(this, object : ApiActionHandler {
-            override fun onMapZoomIn() { handler.post { // v10.0: zoomOffset not supported } }
-            override fun onMapZoomOut() { handler.post { // v10.0: zoomOffset not supported } }
-            override fun onMapZoomReset() { handler.post { // v10.0: zoomOffset not supported } }
+            override fun onMapZoomIn() { handler.post { /* v10.0: no-op */ } }
+            override fun onMapZoomOut() { handler.post { /* v10.0: no-op */ } }
+            override fun onMapZoomReset() { handler.post { /* v10.0: no-op */ } }
             override fun onMirrorToggle() { handler.post {
                 hudView.mirrorEnabled = !hudView.mirrorEnabled
                 flipContainer.pivotY = flipContainer.height / 2f
