@@ -154,9 +154,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private var lastRoadFetchLat = 0.0
     private var lastRoadFetchLng = 0.0
     private var lastRoadFetchTime = 0L
-    // v14.7.12: Minecraft 风格区块预加载 — 追踪当前所在区块
-    private var currentChunkX = Int.MIN_VALUE
-    private var currentChunkZ = Int.MIN_VALUE
+
 
     // === 渲染循环 ===
     private var renderRunning = false
@@ -170,12 +168,8 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     companion object {
         private const val PERM_REQUEST = 100
         private const val TAG = "HudNavi"
-        // v14.7.12: Minecraft 风格区块系统 — 每个区块约 3km × 3km
-        // 进入新区块时预加载当前 + 周围 8 个区块（3×3 网格）
-        private const val CHUNK_SIZE_DEG = 0.03  // ≈ 3km（纬度方向）
-        // Overpass 查询半径 6km，覆盖 3×3 区块（对角线 ≈ 8.5km < 12km 直径）
-        private const val ROAD_FETCH_RADIUS = 6000
-        private const val ROAD_FETCH_INTERVAL = 15000L
+        private const val ROAD_FETCH_DIST = 150.0
+        private const val ROAD_FETCH_INTERVAL = 5000L
         private const val COMPASS_EMA_ALPHA = 0.08f
         private const val HEADING_DEAD_ZONE = 2.5f
         private const val FREEZE_ACC_THRESHOLD = 0.5f
@@ -297,9 +291,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
 
         // v13.14: 初始化 HTTP API 服务器
         apiServer = ApiServer(this, object : ApiActionHandler {
-            override fun onMapZoomIn() { handler.post { hudView.zoomOffset = (hudView.zoomOffset + 1.0f).coerceAtMost(3.0f); hudView.invalidate() } }
-            override fun onMapZoomOut() { handler.post { hudView.zoomOffset = (hudView.zoomOffset - 1.0f).coerceAtLeast(-3.0f); hudView.invalidate() } }
-            override fun onMapZoomReset() { handler.post { hudView.zoomOffset = 0f; hudView.invalidate() } }
+            override fun onMapZoomIn() { handler.post { // v10.0: zoomOffset not supported } }
+            override fun onMapZoomOut() { handler.post { // v10.0: zoomOffset not supported } }
+            override fun onMapZoomReset() { handler.post { // v10.0: zoomOffset not supported } }
             override fun onMirrorToggle() { handler.post {
                 hudView.mirrorEnabled = !hudView.mirrorEnabled
                 flipContainer.pivotY = flipContainer.height / 2f
@@ -333,9 +327,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                     put("vehicle_speed", hudView.vehicleSpeed)
                     put("vehicle_bearing", vehicleBearing)
                     put("mirror_enabled", hudView.mirrorEnabled)
-                    put("zoom_offset", hudView.zoomOffset)
-                    put("navigation_active", hudView.navigationRoute.isNotEmpty())
-                    put("navigation_destination", hudView.navigationDestination ?: "")
+                    put("zoom_offset", 0f)  // v10.0: no zoomOffset
+                    put("navigation_active", false)  // v10.0: no navigation rendering
+                    put("navigation_destination", "")  // v10.0: no navigation rendering
                 }
             }
         })
@@ -440,16 +434,13 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 updateWakeFeedbackMirror()
             }
             command == "MAP_ZOOM_IN" -> {
-                hudView.zoomOffset = (hudView.zoomOffset + 1.0f).coerceAtMost(3.0f)
-                hudView.invalidate()
+                // v10.0: zoomOffset not supported
             }
             command == "MAP_ZOOM_OUT" -> {
-                hudView.zoomOffset = (hudView.zoomOffset - 1.0f).coerceAtLeast(-3.0f)
-                hudView.invalidate()
+                // v10.0: zoomOffset not supported
             }
             command == "MAP_ZOOM_RESET" -> {
-                hudView.zoomOffset = 0f
-                hudView.invalidate()
+                // v10.0: zoomOffset not supported
             }
             command.startsWith("🔍") -> {
                 wakeFeedbackKeyword.text = command
@@ -478,8 +469,8 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 val route = osrmRouter?.route(Pair(currentLat, currentLng), Pair(lat, lng))
                 if (route != null && route.success) {
                     handler.post {
-                        hudView.navigationRoute = route.geometry
-                        hudView.navigationDestination = name
+                        // v10.0: navigation route rendering not supported
+                        // v10.0: navigation route rendering not supported
                         hudView.invalidate()
                         Toast.makeText(this, "导航已启动: $name (${osrmRouter?.formatDistance(route.distance)}, ${osrmRouter?.formatDuration(route.duration)})", Toast.LENGTH_LONG).show()
                     }
@@ -502,8 +493,8 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
      */
     private fun cancelNavigation() {
         Log.i(TAG, "Navigation cancelled")
-        hudView.navigationRoute = emptyList()
-        hudView.navigationDestination = null
+        // v10.0: navigation route rendering not supported
+        // v10.0: navigation route rendering not supported
         hudView.invalidate()
         Toast.makeText(this, "导航已取消", Toast.LENGTH_SHORT).show()
     }
@@ -641,38 +632,19 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
     private fun tryFetchRoads() {
         if (targetLat == 0.0) return
         val now = System.currentTimeMillis()
-
-        // v14.7.12: Minecraft 风格区块预加载
-        // 将世界分成 ~3km × 3km 的区块
-        // 当用户进入新区块时，加载当前区块 + 周围 8 个区块（3×3 网格）
-        // 这样用户走到区块边缘时，相邻区块的路已经预加载好了
-        val chunkX = (targetLng / CHUNK_SIZE_DEG).toInt()
-        val chunkZ = (targetLat / CHUNK_SIZE_DEG).toInt()
-        val chunkChanged = chunkX != currentChunkX || chunkZ != currentChunkZ
+        val dist = RoadFetcher.haversine(targetLat, targetLng, lastRoadFetchLat, lastRoadFetchLng)
         val timeSince = now - lastRoadFetchTime
 
-        // 仅在进入新区块时触发加载（避免 GPS 抖动导致的频繁请求）
-        // 同时保留时间间隔保护（至少 15 秒间隔）
-        val shouldFetch = chunkChanged && timeSince > ROAD_FETCH_INTERVAL
-
-        if (shouldFetch) {
-            currentChunkX = chunkX; currentChunkZ = chunkZ
+        if (dist > ROAD_FETCH_DIST || (timeSince > ROAD_FETCH_INTERVAL && !RoadFetcher.isCacheValid(targetLat, targetLng))) {
             lastRoadFetchLat = targetLat; lastRoadFetchLng = targetLng
             lastRoadFetchTime = now
 
-            Log.i(TAG, "Chunk changed: ($currentChunkX, $currentChunkZ) → fetching 3×3 grid (radius=${ROAD_FETCH_RADIUS}m)")
-
             roadFetchJob?.cancel()
             roadFetchJob = scope.launch {
-                val result = RoadFetcher.fetchRoads(targetLat, targetLng)
-                // 只有数据变了才重绘，避免无谓的屏幕刷新
-                if (result.needRerender) {
-                    hudView.setRoads(result.segments, targetLat, targetLng)
-                    RoadFetcher.markRendered()
-                    Log.i(TAG, "Roads updated: ${result.segments.size} segments (chunk (${chunkX},${chunkZ}))")
-                } else {
-                    Log.i(TAG, "Roads unchanged (hash match), skip rerender")
-                }
+                val segments = RoadFetcher.fetchRoads(targetLat, targetLng)
+                hudView.setRoads(segments, targetLat, targetLng)
+                intersections = buildIntersections(segments)
+                Log.i(TAG, "Roads: ${segments.size} segments, ${intersections.size} intersections")
             }
         }
     }

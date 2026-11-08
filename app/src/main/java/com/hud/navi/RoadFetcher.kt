@@ -32,7 +32,6 @@ import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
-import java.security.MessageDigest
 import kotlin.math.*
 
 /**
@@ -43,8 +42,7 @@ object RoadFetcher {
 
     private const val TAG = "RoadFetcher"
     private const val OVERPASS_URL = "https://overpass-api.de/api/interpreter"
-    // v14.7.12: 增大查询半径到 6km，覆盖 3×3 区块网格（≈9km×9km 范围）
-    private const val RADIUS = 6000
+    private const val RADIUS = 1200
     private const val MIN_INTERVAL_MS = 3000
 
     private var lastFetchTime = 0L
@@ -57,19 +55,11 @@ object RoadFetcher {
     // === 磁盘缓存 ===
     private var cacheDir: File? = null
     private const val CACHE_FILE = "road_cache.json"
-    // 磁盘缓存永不过期（启动时优先显示本地缓存，再异步请求服务器）
-
-    // 当前缓存的逐段哈希集合（用于增量 diff）
-    private var currentSegmentHashes: Set<String> = emptySet()
-    // 按哈希索引的段（用于增量合并时快速查找）
-    private var segmentsByHash: Map<String, RoadSegment> = emptyMap()
-    // 上次渲染时的哈希集合（判断是否需要重绘）
-    private var renderedSegmentHashes: Set<String> = emptySet()
+    private const val CACHE_MAX_AGE_MS = 30 * 60 * 1000L  // 30 分钟
 
     data class RoadSegment(
         val type: RoadType,
-        val points: List<Pair<Double, Double>>,
-        val name: String = ""
+        val points: List<Pair<Double, Double>>
     )
 
     enum class RoadType(val priority: Int, val color: Int, val widthBase: Float) {
@@ -106,26 +96,22 @@ object RoadFetcher {
 
     /**
      * 从磁盘加载缓存（启动时调用，秒加载）
-     * 本地缓存永久有效，优先显示
-     * 加载后立即构建逐段哈希索引，用于后续增量 diff
      */
     fun loadDiskCache(): List<RoadSegment> {
         val dir = cacheDir ?: return emptyList()
         val file = File(dir, CACHE_FILE)
         if (!file.exists()) return emptyList()
 
+        val age = System.currentTimeMillis() - file.lastModified()
+        if (age > CACHE_MAX_AGE_MS) {
+            Log.i(TAG, "Disk cache expired (${age / 1000}s old)")
+            return emptyList()
+        }
+
         return try {
             val json = file.readText()
             val segments = deserializeSegments(json)
-            // 构建逐段哈希索引
-            val hashMap = mutableMapOf<String, RoadSegment>()
-            for (seg in segments) {
-                hashMap[computeSegmentHash(seg)] = seg
-            }
-            segmentsByHash = hashMap
-            currentSegmentHashes = hashMap.keys
-            renderedSegmentHashes = currentSegmentHashes  // 标记为已渲染
-            Log.i(TAG, "Loaded ${segments.size} segments from disk cache (${currentSegmentHashes.size} unique hashes)")
+            Log.i(TAG, "Loaded ${segments.size} segments from disk cache (${age / 1000}s old)")
             segments
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load disk cache: ${e.message}")
@@ -134,8 +120,7 @@ object RoadFetcher {
     }
 
     /**
-     * 保存合并后的路网到磁盘（全量写入，渲染需要完整数据）
-     * 增量逻辑在内存中完成，磁盘只做持久化
+     * 保存缓存到磁盘
      */
     private fun saveDiskCache(segments: List<RoadSegment>, lat: Double, lng: Double) {
         val dir = cacheDir ?: return
@@ -149,71 +134,6 @@ object RoadFetcher {
         }
     }
 
-    /**
-     * 计算单条路网的 SHA-256 哈希（逐段哈希，用于增量 diff）
-     * 量化到小数点后5位（~1m精度），同一条路在不同请求中哈希一致
-     */
-    private fun computeSegmentHash(seg: RoadSegment): String {
-        val md = MessageDigest.getInstance("SHA-256")
-        md.update(seg.type.name.toByteArray())
-        if (seg.name.isNotEmpty()) md.update(seg.name.toByteArray())
-        for ((lat, lng) in seg.points) {
-            val latInt = (lat * 100000).toInt()
-            val lngInt = (lng * 100000).toInt()
-            md.update(byteArrayOf(
-                (latInt shr 24).toByte(), (latInt shr 16).toByte(),
-                (latInt shr 8).toByte(), latInt.toByte()
-            ))
-            md.update(byteArrayOf(
-                (lngInt shr 24).toByte(), (lngInt shr 16).toByte(),
-                (lngInt shr 8).toByte(), lngInt.toByte()
-            ))
-        }
-        return md.digest().joinToString("") { "%02x".format(it) }
-    }
-
-    /**
-     * 增量 diff：比对新旧哈希集合，返回合并后的段列表和变化统计
-     */
-    data class DiffResult(
-        val merged: List<RoadSegment>,
-        val added: Int,
-        val removed: Int,
-        val unchanged: Int
-    ) {
-        val hasChanges: Boolean get() = added > 0 || removed > 0
-    }
-
-    private fun diffAndMerge(newSegments: List<RoadSegment>): DiffResult {
-        // 1. 构建新数据的哈希索引
-        val newHashMap = mutableMapOf<String, RoadSegment>()
-        for (seg in newSegments) {
-            newHashMap[computeSegmentHash(seg)] = seg
-        }
-        val newHashes = newHashMap.keys
-
-        // 2. 集合运算
-        val addedHashes = newHashes - currentSegmentHashes
-        val removedHashes = currentSegmentHashes - newHashes
-        val unchangedHashes = currentSegmentHashes intersect newHashes
-
-        // 3. 增量合并：保留不变段（从缓存取）+ 加入新段
-        val mergedMap = mutableMapOf<String, RoadSegment>()
-        for (h in unchangedHashes) {
-            segmentsByHash[h]?.let { mergedMap[h] = it }
-        }
-        for (h in addedHashes) {
-            newHashMap[h]?.let { mergedMap[h] = it }
-        }
-
-        // 4. 更新索引
-        segmentsByHash = mergedMap
-        currentSegmentHashes = mergedMap.keys
-
-        val merged = mergedMap.values.sortedBy { it.type.priority }
-        return DiffResult(merged, addedHashes.size, removedHashes.size, unchangedHashes.size)
-    }
-
     private fun serializeSegments(segments: List<RoadSegment>, lat: Double, lng: Double): String {
         val root = JSONObject()
         root.put("centerLat", lat)
@@ -224,7 +144,6 @@ object RoadFetcher {
         for (seg in segments) {
             val obj = JSONObject()
             obj.put("type", seg.type.name)
-            if (seg.name.isNotEmpty()) obj.put("name", seg.name)
             val ptsArr = org.json.JSONArray()
             for ((plat, plng) in seg.points) {
                 ptsArr.put(plat)
@@ -254,8 +173,7 @@ object RoadFetcher {
             }
 
             if (points.size >= 2) {
-                val roadName = obj.optString("name", "")
-                segments.add(RoadSegment(type, points, roadName))
+                segments.add(RoadSegment(type, points))
             }
         }
 
@@ -268,76 +186,40 @@ object RoadFetcher {
 
     /**
      * 获取路网数据（内存缓存 + 磁盘缓存 + 网络）
-     *
-     * 增量更新流程：
-     * 1. 从服务器拉取新数据
-     * 2. 对每段路计算 SHA-256 哈希
-     * 3. 与缓存哈希集合做差集 → 得到 added/removed
-     * 4. 增量合并：保留不变段 + 加入新段 - 移除旧段
-     * 5. 只有存在实际变化时才标记 needRerender
      */
-    data class FetchResult(
-        val segments: List<RoadSegment>,
-        val needRerender: Boolean
-    )
-
-    suspend fun fetchRoads(lat: Double, lng: Double): FetchResult = withContext(Dispatchers.IO) {
+    suspend fun fetchRoads(lat: Double, lng: Double): List<RoadSegment> = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
         val dist = haversine(lat, lng, cacheCenterLat, cacheCenterLng)
 
-        // 内存缓存命中（短时间内距离很近，不需要重新请求）
+        // 内存缓存命中
         if (cachedSegments.isNotEmpty() && dist < 200.0 && (now - lastFetchTime) < 15000) {
-            return@withContext FetchResult(cachedSegments, false)
+            return@withContext cachedSegments
         }
 
         // 限流
         if (now - lastFetchTime < MIN_INTERVAL_MS) {
-            return@withContext FetchResult(cachedSegments, false)
+            return@withContext cachedSegments
         }
 
         try {
             val query = buildQuery(lat, lng)
             val result = httpPost(OVERPASS_URL, "data=${URLEncoder.encode(query, "UTF-8")}")
-            val newSegments = parseOverpassResponse(result)
+            val segments = parseOverpassResponse(result)
 
-            // 增量 diff + 合并
-            val diff = diffAndMerge(newSegments)
-
-            if (!diff.hasChanges && cachedSegments.isNotEmpty()) {
-                // 哈希集合完全一致，没有任何段增删，不需要重绘
-                Log.i(TAG, "No changes (${diff.unchanged} segments identical), skip rerender")
-                lastFetchTime = now
-                return@withContext FetchResult(cachedSegments, false)
-            }
-
-            // 有变化，更新缓存
-            cachedSegments = diff.merged
+            cachedSegments = segments
             cacheCenterLat = lat
             cacheCenterLng = lng
             lastFetchTime = now
-            saveDiskCache(diff.merged, lat, lng)
 
-            Log.i(TAG, "Incremental update: +${diff.added} -${diff.removed} =${diff.unchanged} → ${diff.merged.size} total")
-            FetchResult(diff.merged, true)
+            // 保存到磁盘
+            saveDiskCache(segments, lat, lng)
+
+            Log.i(TAG, "Fetched ${segments.size} road segments")
+            segments
         } catch (e: Exception) {
             Log.e(TAG, "Overpass fetch failed: ${e.message}")
-            // 请求失败，返回缓存数据，不需要重绘
-            FetchResult(cachedSegments, false)
+            cachedSegments
         }
-    }
-
-    /**
-     * 标记当前缓存数据已渲染到屏幕
-     */
-    fun markRendered() {
-        renderedSegmentHashes = currentSegmentHashes
-    }
-
-    /**
-     * 检查当前缓存是否与上次渲染的数据不同
-     */
-    fun needsRerender(): Boolean {
-        return currentSegmentHashes != renderedSegmentHashes && cachedSegments.isNotEmpty()
     }
 
     private fun buildQuery(lat: Double, lng: Double): String {
@@ -380,8 +262,7 @@ object RoadFetcher {
             }
 
             if (points.size >= 2) {
-                val roadName = tags.optString("name", "")
-                segments.add(RoadSegment(roadType, points, roadName))
+                segments.add(RoadSegment(roadType, points))
             }
         }
 
@@ -414,6 +295,6 @@ object RoadFetcher {
     }
 
     fun isCacheValid(lat: Double, lng: Double): Boolean {
-        return cachedSegments.isNotEmpty() && haversine(lat, lng, cacheCenterLat, cacheCenterLng) < 5000.0
+        return cachedSegments.isNotEmpty() && haversine(lat, lng, cacheCenterLat, cacheCenterLng) < 800.0
     }
 }

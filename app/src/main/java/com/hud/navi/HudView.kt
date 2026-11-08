@@ -1,14 +1,19 @@
 /*
- * HudView.kt - v15.0 自研 Canvas 2D 地图渲染引擎
+ * hud-navi - Lightweight HUD navigation with Canvas 2D rendering
+ * Copyright (C) 2026 Pjjush16
  *
- * 完全移除 MapLibre，回归自研渲染：
- * - Overpass API 矢量路网 + 透视投影（45° 倾斜）
- * - 道路按类型分层着色（高速红/主干橙/支路绿/服务灰）
- * - 车辆标记（蓝色 chevron 箭头）
- * - 导航路线（深蓝轮廓 + 亮蓝路线）
- * - 速度仪表（速度制颜色渐变）
- * - HUD 镜像（垂直翻转，挡风玻璃投影）
- * - OSM 归属标注
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
 package com.hud.navi
@@ -19,6 +24,14 @@ import android.util.AttributeSet
 import android.view.View
 import kotlin.math.*
 
+/**
+ * hud-navi v10.0 — 应用图标 + 签名发布 + GitHub Release
+ *
+ * v10.0 变更：
+ * - 新增自定义应用图标（HUD 导航风格）
+ * - 配置 release 签名（keystore）
+ * - CI 自动构建 release APK 并发布到 GitHub Releases
+ */
 class HudView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
 ) : View(context, attrs) {
@@ -28,16 +41,10 @@ class HudView @JvmOverloads constructor(
     var vehicleLng: Double = 0.0
     var vehicleBearing: Float = 0f
     var vehicleSpeed: Float = 0f     // km/h
+    var statusText: String = "等待 GPS..."
 
-    // === HUD 镜像 ===
-    var mirrorEnabled: Boolean = true
-
-    // === 地图中心 ===
-    var mapCenterLat: Double = 0.0
-    var mapCenterLng: Double = 0.0
-
-    // === 手动缩放偏移（语音控制） ===
-    var zoomOffset: Float = 0f
+    // === HUD 镜像（垂直翻转，用于挡风玻璃投影） ===
+    var mirrorEnabled: Boolean = true  // 默认开启镜像
 
     // === 路网数据 ===
     var roadSegments: List<RoadFetcher.RoadSegment> = emptyList()
@@ -45,61 +52,20 @@ class HudView @JvmOverloads constructor(
     var hasRoads: Boolean = false
         private set
 
-    // === 导航路线 ===
-    var navigationRoute: List<Pair<Double, Double>> = emptyList()
-        set(value) {
-            field = value
-        }
-    var navigationDestination: String? = null
-
     // === 道路吸附 ===
     var snappedLat: Double = 0.0
     var snappedLng: Double = 0.0
     var isSnapped: Boolean = false
 
-    // === 渲染参数 ===
-    // 45° 透视投影参数
-    private val PITCH_DEG = 45.0
-    private val pitchRad = Math.toRadians(PITCH_DEG)
-    private val cosPitch = cos(pitchRad)
-    private val sinPitch = sin(pitchRad)
-
-    // 基准米/像素比（zoom=19 时约 0.3m/px）
-    private fun metersPerPixel(): Double {
-        val baseZoom = 19.0 + zoomOffset
-        return 156543.03392 * cos(Math.toRadians(vehicleLat)) / (1 shl baseZoom.toInt())
-    }
-
-    // === 速度 → 颜色插值 ===
-    private fun getSpeedColor(speedKmh: Float): Int {
-        val t = (speedKmh / 120f).coerceIn(0f, 1f)
-        return when {
-            t <= 0.5f -> {
-                val r = (t / 0.5f)
-                Color.rgb((r * 255).toInt(), 255, 0)
-            }
-            else -> {
-                val r = ((t - 0.5f) / 0.5f)
-                Color.rgb(255, (255 * (1f - r)).toInt(), 0)
-            }
-        }
-    }
-
     // === 速度制动态缩放 ===
-    fun getDynamicZoom(speedKmh: Float): Float {
+    private fun getDynamicZoom(speedKmh: Float): Float {
         val clamped = speedKmh.coerceIn(0f, 150f)
-        val base = 19.5f - (clamped / 150f) * 3f
-        return (base + zoomOffset).coerceIn(14f, 22f)
-    }
-
-    fun setRoads(segments: List<RoadFetcher.RoadSegment>, centerLat: Double, centerLng: Double) {
-        roadSegments = segments
-        hasRoads = segments.isNotEmpty()
-        mapCenterLat = centerLat
-        mapCenterLng = centerLng
+        return 18f - (clamped / 150f) * 3f
     }
 
     // === 画笔 ===
+    private val roadPaints = mutableMapOf<RoadFetcher.RoadType, Paint>()
+
     private val speedNumPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE; textSize = 96f; isFakeBoldText = true
         typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
@@ -110,45 +76,58 @@ class HudView @JvmOverloads constructor(
         typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
         textAlign = Paint.Align.CENTER
     }
-    private val roadPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND
-        strokeJoin = Paint.Join.ROUND
-    }
-    private val roadOutlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND
-        strokeJoin = Paint.Join.ROUND
-        color = Color.parseColor("#1A1A1A")
-    }
-    private val routeOutlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND
-        strokeJoin = Paint.Join.ROUND
-        color = Color.parseColor("#003366")
-        strokeWidth = 12f
-    }
-    private val routeLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND
-        strokeJoin = Paint.Join.ROUND
-        color = Color.parseColor("#00BFFF")
-        strokeWidth = 6f
-    }
-    private val vehiclePaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val attribPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#44FFFFFF")
-        textSize = 22f
-        textAlign = Paint.Align.CENTER
-        typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
-    }
-    private val waitPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#FF8844"); textSize = 36f
-        textAlign = Paint.Align.CENTER
+
+    // === 顶部渐变遮罩画笔（路网淡出效果） ===
+    private val topFadePaint = Paint().apply { style = Paint.Style.FILL }
+
+    // === 速度 → 颜色插值 ===
+    private fun getSpeedColor(speedKmh: Float): Int {
+        val t = (speedKmh / 120f).coerceIn(0f, 1f)
+        return when {
+            t <= 0.5f -> {
+                // 绿 → 黄
+                val r = (t / 0.5f)
+                Color.rgb((r * 255).toInt(), 255, 0)
+            }
+            else -> {
+                // 黄 → 红
+                val r = ((t - 0.5f) / 0.5f)
+                Color.rgb(255, (255 * (1f - r)).toInt(), 0)
+            }
+        }
     }
 
+    private val vehicleFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE; style = Paint.Style.FILL
+    }
+    private val vehicleStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE; style = Paint.Style.STROKE
+        strokeWidth = 2f; strokeJoin = Paint.Join.ROUND
+    }
+
+    private val snapGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0x3300FF88.toInt(); style = Paint.Style.FILL
+        maskFilter = BlurMaskFilter(20f, BlurMaskFilter.Blur.OUTER)
+    }
+
+    private val roadPath = Path()
+
     init {
-        setBackgroundColor(Color.BLACK)
+        setLayerType(LAYER_TYPE_SOFTWARE, null)
+        RoadFetcher.RoadType.values().forEach { type ->
+            roadPaints[type] = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = type.color
+                style = Paint.Style.STROKE
+                strokeCap = Paint.Cap.ROUND
+                strokeJoin = Paint.Join.ROUND
+            }
+        }
+    }
+
+    fun setRoads(segments: List<RoadFetcher.RoadSegment>, centerLat: Double, centerLng: Double) {
+        roadSegments = segments
+        hasRoads = segments.isNotEmpty()
+        invalidate()
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -156,160 +135,161 @@ class HudView @JvmOverloads constructor(
         val w = width.toFloat()
         val h = height.toFloat()
 
+        canvas.drawColor(Color.BLACK)
+
         if (vehicleLat == 0.0) {
+            val waitPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#FF8844"); textSize = 36f
+                textAlign = Paint.Align.CENTER
+            }
             canvas.drawText("等待 GPS...", w / 2f, h / 2f, waitPaint)
             return
         }
 
-        // 1. 画路网
-        drawRoads(canvas, w, h)
+        // HUD 镜像：垂直翻转整个画面（挡风玻璃投影）
+        if (mirrorEnabled) {
+            canvas.save()
+            canvas.scale(1f, -1f, w / 2f, h / 2f)
+        }
 
-        // 2. 画导航路线
-        drawNavigationRoute(canvas, w, h)
+        val dynamicZoom = getDynamicZoom(vehicleSpeed)
+        val metersPerPixel = getMetersPerPixel(vehicleLat, dynamicZoom)
 
-        // 3. 画车辆标记
+        drawRoadNetwork(canvas, w, h, metersPerPixel)
         drawVehicleMarker(canvas, w, h)
 
-        // 4. 画速度仪表
+        // 渐变遮罩：视觉底部 28% 区域做 BLACK→TRANSPARENT 渐变，其余透明
+        val fadeHeight = h * 0.28f
+        val fadeShader = if (mirrorEnabled) {
+            // 镜像翻转后 canvas y=h = 视觉底部
+            // y=h BLACK → y=h-fadeHeight TRANSPARENT
+            // CLAMP y<h-fadeHeight → TRANSPARENT（路网区域全透明）
+            LinearGradient(0f, h, 0f, h - fadeHeight,
+                Color.BLACK, Color.TRANSPARENT, Shader.TileMode.CLAMP)
+        } else {
+            // 非镜像：canvas y=0 = 视觉顶部
+            // y=0 BLACK → y=fadeHeight TRANSPARENT
+            // CLAMP y>fadeHeight → TRANSPARENT（路网区域全透明）
+            LinearGradient(0f, 0f, 0f, fadeHeight,
+                Color.BLACK, Color.TRANSPARENT, Shader.TileMode.CLAMP)
+        }
+        topFadePaint.shader = fadeShader
+        canvas.drawRect(0f, 0f, w, h, topFadePaint)
+
+        // 速度显示（在镜像块内部，随镜像翻转）
         drawSpeedometer(canvas, w, h)
 
-        // 5. OSM 归属标注
-        canvas.drawText("© OpenStreetMap contributors", w / 2f, h - 8f, attribPaint)
-    }
-
-    // === 经纬度 → 屏幕坐标（透视投影） ===
-    // 以车辆位置为中心，heading 方向朝上，45° 俯视角
-    private fun projectToScreen(lat: Double, lng: Double, w: Float, h: Float): FloatArray {
-        val mpp = metersPerPixel()
-        val cosBearing = cos(Math.toRadians(vehicleBearing.toDouble()))
-        val sinBearing = sin(Math.toRadians(vehicleBearing.toDouble()))
-
-        // 经纬度差 → 米（以车辆为中心）
-        val dLatM = (lat - vehicleLat) * 111_320.0
-        val dLngM = (lng - vehicleLng) * 111_320.0 * cos(Math.toRadians(vehicleLat))
-
-        // 旋转（heading 朝上）：把世界坐标旋转到车辆坐标系
-        // 车辆前方 = 屏幕上方
-        val rotatedX = dLatM * sinBearing + dLngM * cosBearing   // 左右
-        val rotatedY = dLatM * cosBearing - dLngM * sinBearing   // 前后（正=前方）
-
-        // 透视投影：45° 倾斜
-        // 远处的物体（rotatedY 大 = 前方）在屏幕上更高、更小
-        val depth = rotatedY * cosPitch + 3.0 * sinPitch  // 3m 眼高
-        val scale = if (depth > 0.1) (3.0 / depth) else 0.0
-
-        val screenX = w / 2f + (rotatedX * scale / mpp).toFloat()
-        // 车辆位置在屏幕 70% 高度处（留出前方视野）
-        val screenY = h * 0.70f - (rotatedY * sinPitch * scale / mpp).toFloat()
-
-        return floatArrayOf(screenX, screenY, scale.toFloat())
-    }
-
-    // === 画路网 ===
-    private fun drawRoads(canvas: Canvas, w: Float, h: Float) {
-        if (!hasRoads) return
-
-        for (seg in roadSegments) {
-            val pts = seg.points
-            if (pts.size < 2) continue
-
-            // 使用 RoadType 枚举自带的颜色和宽度
-            val fillColor = seg.type.color
-            val fillW = seg.type.widthBase * 1.5f   // HUD 模式下线条加粗
-            val outlineW = fillW + 3f
-
-            // 先画轮廓（深色描边）
-            roadOutlinePaint.strokeWidth = outlineW
-            roadOutlinePaint.color = Color.parseColor("#1A1A1A")
-            drawPolyline(canvas, pts, w, h, roadOutlinePaint)
-
-            // 再画填充（道路颜色）
-            roadPaint.strokeWidth = fillW
-            roadPaint.color = fillColor
-            drawPolyline(canvas, pts, w, h, roadPaint)
-        }
-    }
-
-    private fun drawPolyline(canvas: Canvas, points: List<Pair<Double, Double>>, w: Float, h: Float, paint: Paint) {
-        if (points.size < 2) return
-        val path = Path()
-        val first = projectToScreen(points[0].first, points[0].second, w, h)
-        path.moveTo(first[0], first[1])
-
-        for (i in 1 until points.size) {
-            val p = projectToScreen(points[i].first, points[i].second, w, h)
-            // 裁剪：跳过完全在屏幕外的线段（宽松裁剪，留 200px 余量）
-            if (p[0] < -200f || p[0] > w + 200f || p[1] < -200f || p[1] > h + 200f) {
-                // 如果前一个点在屏内，先 lineTo 到当前点再 moveTo
-                val prev = projectToScreen(points[i-1].first, points[i-1].second, w, h)
-                if (prev[0] in -200f..(w+200f) && prev[1] in -200f..(h+200f)) {
-                    path.lineTo(p[0], p[1])
-                }
-                path.moveTo(p[0], p[1])
-            } else {
-                path.lineTo(p[0], p[1])
-            }
+        if (mirrorEnabled) {
+            canvas.restore()
         }
 
-        canvas.drawPath(path, paint)
+        // OSM 归属标注（ODbL 协议要求，始终在视觉底部）
+        drawAttribution(canvas, w, h)
     }
 
-    // === 画导航路线 ===
-    private fun drawNavigationRoute(canvas: Canvas, w: Float, h: Float) {
-        if (navigationRoute.size < 2) return
-        val pts = navigationRoute
-        val path = Path()
-        val first = projectToScreen(pts[0].first, pts[0].second, w, h)
-        path.moveTo(first[0], first[1])
-        for (i in 1 until pts.size) {
-            val p = projectToScreen(pts[i].first, pts[i].second, w, h)
-            path.lineTo(p[0], p[1])
+    private fun drawAttribution(canvas: Canvas, w: Float, h: Float) {
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#44FFFFFF")
+            textSize = 22f
+            textAlign = Paint.Align.CENTER
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
         }
-        canvas.drawPath(path, routeOutlinePaint)
-        canvas.drawPath(path, routeLinePaint)
+        // 镜像时视觉底部 = canvas y=0 附近；非镜像 = canvas y=h 附近
+        val attrY = if (mirrorEnabled) 24f else h - 8f
+        canvas.drawText("© OpenStreetMap contributors", w / 2f, attrY, paint)
     }
 
-    // === 画车辆标记 ===
-    private fun drawVehicleMarker(canvas: Canvas, w: Float, h: Float) {
-        // 车辆始终在屏幕中心偏下（70% 高度）
+    private fun drawRoadNetwork(canvas: Canvas, w: Float, h: Float, metersPerPixel: Double) {
+        val drawLat = if (isSnapped) snappedLat else vehicleLat
+        val drawLng = if (isSnapped) snappedLng else vehicleLng
         val cx = w / 2f
-        val cy = h * 0.70f
-        val size = 32f
+        val cy = h * 0.55f
 
-        // 白色外圈
-        vehiclePaint.color = Color.WHITE
-        vehiclePaint.style = Paint.Style.FILL
-        canvas.drawCircle(cx, cy, size * 1.3f, vehiclePaint)
+        canvas.save()
+        canvas.translate(cx, cy)
+        canvas.rotate(-vehicleBearing)
 
-        // 蓝色内圆
-        vehiclePaint.color = Color.parseColor("#2196F3")
-        canvas.drawCircle(cx, cy, size * 1.1f, vehiclePaint)
+        val dynamicZoom = getDynamicZoom(vehicleSpeed)
+        val zoomFactor = 2f.pow(dynamicZoom - 15)
 
-        // 白色 chevron 箭头（朝上 = 车辆前方方向）
-        vehiclePaint.color = Color.WHITE
-        vehiclePaint.style = Paint.Style.FILL
+        for (segment in roadSegments) {
+            val paint = roadPaints[segment.type] ?: continue
+            paint.strokeWidth = segment.type.widthBase * zoomFactor * 0.7f
 
-        val tipY = cy - size * 0.7f
-        val shoulderY = cy + size * 0.55f
-        val indentY = cy + size * 0.05f
-        val halfW = size * 0.5f
+            roadPath.reset()
+            var first = true
+            for ((lat, lng) in segment.points) {
+                val (px, py) = latLngToPixel(lat, lng, drawLat, drawLng, metersPerPixel)
+                if (first) { roadPath.moveTo(px, py); first = false }
+                else roadPath.lineTo(px, py)
+            }
+            canvas.drawPath(roadPath, paint)
+        }
 
-        val chevron = Path().apply {
+        canvas.restore()
+    }
+
+    private fun latLngToPixel(
+        lat: Double, lng: Double,
+        centerLat: Double, centerLng: Double,
+        metersPerPixel: Double
+    ): Pair<Float, Float> {
+        val cosLat = cos(Math.toRadians(centerLat))
+        val dx = (lng - centerLng) * 111320.0 * cosLat
+        val dy = (lat - centerLat) * 110540.0
+        val px = (dx / metersPerPixel).toFloat()
+        val py = (-dy / metersPerPixel).toFloat()
+        return Pair(px, py)
+    }
+
+    private fun getMetersPerPixel(lat: Double, zoom: Float): Double {
+        val cosLat = cos(Math.toRadians(lat))
+        return 156543.03392 * cosLat / (2.0.pow(zoom.toDouble()))
+    }
+
+    private fun drawVehicleMarker(canvas: Canvas, w: Float, h: Float) {
+        val cx = w / 2f
+        val cy = h * 0.55f
+
+        // 车标颜色随速度变化：绿→黄→红
+        val speedColor = getSpeedColor(vehicleSpeed)
+        vehicleFillPaint.color = speedColor
+        vehicleStrokePaint.color = speedColor
+
+        if (isSnapped) {
+            // 吸附光晕也用速度色
+            snapGlowPaint.color = Color.argb(0x33,
+                Color.red(speedColor), Color.green(speedColor), Color.blue(speedColor))
+            canvas.drawCircle(cx, cy, 30f, snapGlowPaint)
+        }
+
+        val size = 28f
+        val tipY = cy - size * 1.4f
+        val shoulderY = cy + size * 0.3f
+        val tailY = cy + size * 0.8f
+        val indentY = cy
+        val halfW = size * 0.55f
+
+        val dartPath = Path().apply {
             moveTo(cx, tipY)
             lineTo(cx - halfW, shoulderY)
+            lineTo(cx - halfW * 0.4f, tailY)
             lineTo(cx, indentY)
+            lineTo(cx + halfW * 0.4f, tailY)
             lineTo(cx + halfW, shoulderY)
             close()
         }
-        canvas.drawPath(chevron, vehiclePaint)
+
+        canvas.drawPath(dartPath, vehicleFillPaint)
+        canvas.drawPath(dartPath, vehicleStrokePaint)
     }
 
-    // === 画速度仪表 ===
     private fun drawSpeedometer(canvas: Canvas, w: Float, h: Float) {
         val cx = w / 2f
         val speedY = 120f
         val speedStr = vehicleSpeed.toInt().toString()
 
+        // 速度数字随车标同色
         speedNumPaint.color = getSpeedColor(vehicleSpeed)
         canvas.drawText(speedStr, cx, speedY, speedNumPaint)
         canvas.drawText("km/h", cx, speedY + 40f, speedUnitPaint)
