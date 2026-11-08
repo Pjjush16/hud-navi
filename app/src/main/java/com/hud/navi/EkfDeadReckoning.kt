@@ -1,169 +1,120 @@
 /*
- * EkfDeadReckoning.kt - v15.2 纯 GPS+EKF 定位
+ * hud-navi - Lightweight HUD navigation with Canvas 2D rendering
+ * Copyright (C) 2026 Pjjush16
  *
- * 基于 v10.00 的 4 维 EKF（lat, lng, vN, vE）。
- * 去掉了所有路口减速/停车逻辑（v15.1 的距离驱动减速导致"引力弹弓"问题）。
- * 车标位置 = EKF 输出的实时位置，不做任何延迟或减速。
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
  *
- * 状态向量 [4]: [lat, lng, vN, vE]
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
 package com.hud.navi
 
 import kotlin.math.*
 
+/**
+ * EKF 卡尔曼融合惯导引擎
+ *
+ * 学自高德车机版 v9.5.0 逆向分析：
+ * - "后端融合"模式：IMU 推算的经纬度是主位置
+ * - GPS 只在偏差超阈值时校正（卡尔曼增益动态调节）
+ * - GPS 丢失后 IMU 继续推算，地图匹配约束在道路上
+ *
+ * 状态向量 [4]:
+ *   [0] lat (deg)
+ *   [1] lng (deg)
+ *   [2] vN (m/s) — 北向速度
+ *   [3] vE (m/s) — 东向速度
+ *
+ * 观测量: GPS lat, lng
+ *
+ * 控制输入: heading (deg), speed (m/s) — 来自 GPS bearing + speed
+ *
+ * 参考: 高德 SatSol.smali / OpenSpaceDetectorForCar.smali 中的 KalmanFilter 使用模式
+ */
 class EkfDeadReckoning {
 
     // === 状态 ===
-    var lat = 0.0
-    var lng = 0.0
-    var vN = 0.0
-    var vE = 0.0
-    var heading = 0.0      // deg, 0=北
-    var speed = 0.0        // m/s
+    var lat = 0.0          // 当前纬度（EKF 输出，这就是"主位置"）
+    var lng = 0.0          // 当前经度
+    var vN = 0.0           // 北向速度 (m/s)
+    var vE = 0.0           // 东向速度 (m/s)
+    var heading = 0.0      // 当前航向 (deg, 0=北)
+    var speed = 0.0        // 当前速度 (m/s)
     var initialized = false
 
-    // === 协方差 P (4x4 对角近似) ===
+    // === 协方差矩阵 P (4x4, 对角线近似) ===
+    // P[0][0] = lat 方差, P[1][1] = lng 方差, P[2][2] = vN 方差, P[3][3] = vE 方差
     private val P = Array(4) { DoubleArray(4) }
 
-    // === 噪声参数 ===
-    private val ACCEL_NOISE = 0.5   // m/s²
-    private var gpsR = 10.0         // GPS 观测噪声（米）
-    private val GPS_R_FLOOR = 3.0
+    // === 过程噪声 Q ===
+    // 加速度噪声标准差（m/s²），手机 IMU 典型值 0.3~1.0
+    private val ACCEL_NOISE = 0.5
+
+    // === GPS 观测噪声 R ===
+    // GPS 水平精度（米），由 GPS accuracy 动态调整
+    private var gpsR = 10.0  // 默认 10m
 
     // === GPS 丢失计时 ===
-    var gpsLostTimeMs = 0L
+    var gpsLostTimeMs = 0L   // GPS 丢失后经过的毫秒数
     private var lastGpsTimeMs = 0L
 
-    // === 调试输出 ===
+    // === 卡尔曼增益 (用于调试输出) ===
     var lastKalmanGain = 0.0
-    var lastInnovation = 0.0
+    var lastInnovation = 0.0  // 观测残差（米）
 
-    // === 航向源（多源融合） ===
-    var compassBearing = 0.0
-    var compassAvailable = false
-    var rvBearing = 0.0
-    var rvAvailable = false
-    var gyroRateDegPerSec = 0.0
-    private var gyroAvailable = false
-    private var lastGyroTimeMs = 0L
-
-    // 罗盘平滑
-    private var compassSmoothed = 0.0
-    private var compassInit = false
-    private var rvSmoothed = 0.0
-    private var rvInit = false
-
-    // === 路网吸附（v10.20 简化版） ===
-    var snappedToRoad = false
-    var roadHeadingDeg = 0.0
-    var snapConfidence = 0.0
-
-    // === 初始化 ===
+    /**
+     * 初始化：第一次 GPS 定位时调用
+     */
     fun initialize(lat: Double, lng: Double, bearing: Float, speedMs: Float, timeMs: Long) {
-        this.lat = lat; this.lng = lng
+        this.lat = lat
+        this.lng = lng
         this.heading = bearing.toDouble()
         this.speed = speedMs.toDouble()
 
-        val hRad = Math.toRadians(heading)
-        vN = speed * cos(hRad)
-        vE = speed * sin(hRad)
+        // 分解速度到北/东分量
+        val headingRad = Math.toRadians(heading)
+        vN = speed * cos(headingRad)
+        vE = speed * sin(headingRad)
 
-        val initVar = (gpsR * gpsR) / (111111.0 * 111111.0)
-        for (i in 0..3) for (j in 0..3) P[i][j] = 0.0
-        P[0][0] = initVar; P[1][1] = initVar
-        P[2][2] = 4.0; P[3][3] = 4.0
+        // 初始协方差：GPS 精度
+        val initVar = (gpsR * gpsR / (111111.0 * 111111.0))
+        P[0][0] = initVar; P[0][1] = 0.0; P[0][2] = 0.0; P[0][3] = 0.0
+        P[1][0] = 0.0; P[1][1] = initVar; P[1][2] = 0.0; P[1][3] = 0.0
+        P[2][0] = 0.0; P[2][1] = 0.0; P[2][2] = 4.0; P[2][3] = 0.0  // 速度方差 4 (m/s)²
+        P[3][0] = 0.0; P[3][1] = 0.0; P[3][2] = 0.0; P[3][3] = 4.0
 
         lastGpsTimeMs = timeMs
         gpsLostTimeMs = 0L
         initialized = true
     }
 
-    // === 外部航向源输入 ===
-
-    fun updateCompass(bearingDeg: Float) {
-        compassAvailable = true
-        if (!compassInit) {
-            compassSmoothed = bearingDeg.toDouble()
-            compassInit = true
-        } else {
-            var diff = bearingDeg.toDouble() - compassSmoothed
-            if (diff > 180) diff -= 360
-            if (diff < -180) diff += 360
-            compassSmoothed += 0.15 * diff
-            if (compassSmoothed < 0) compassSmoothed += 360
-            if (compassSmoothed >= 360) compassSmoothed -= 360
-        }
-        compassBearing = compassSmoothed
-    }
-
-    fun updateGyroRate(rateDegPerSec: Float) {
-        gyroAvailable = true
-        lastGyroTimeMs = System.currentTimeMillis()
-        gyroRateDegPerSec += 0.3 * (rateDegPerSec.toDouble() - gyroRateDegPerSec)
-    }
-
-    fun updateRotationVector(bearingDeg: Float) {
-        rvAvailable = true
-        if (!rvInit) {
-            rvSmoothed = bearingDeg.toDouble()
-            rvInit = true
-        } else {
-            var diff = bearingDeg.toDouble() - rvSmoothed
-            if (diff > 180) diff -= 360
-            if (diff < -180) diff += 360
-            rvSmoothed += 0.2 * diff
-            if (rvSmoothed < 0) rvSmoothed += 360
-            if (rvSmoothed >= 360) rvSmoothed -= 360
-        }
-        rvBearing = rvSmoothed
-    }
-
-    // IMU 接口（保留 API 兼容）
-    fun updateIMU(accel: FloatArray, gyro: FloatArray, timestampNs: Long) {
-        if (gyro.size >= 3) {
-            updateGyroRate(Math.toDegrees(gyro[2].toDouble()).toFloat())
-        }
-    }
-
-    // === 预测步（Predict）— 每帧调用 ===
-
-    fun predict(dtMs: Long, headingDeg: Float = -1f, speedMs: Float = 0f,
-                linearAccelMag: Double = 999.0,
-                worldAccN: Double = 0.0, worldAccE: Double = 0.0) {
+    /**
+     * 预测步（Predict）— 每帧调用（16ms）
+     *
+     * 用当前速度 + 航向前推位置（惯导推算）
+     * 这是高德"后端融合"的核心：预测位置就是显示位置
+     *
+     * @param dtMs 帧间隔（毫秒）
+     * @param headingDeg 当前航向（度，来自 GPS bearing 或 IMU）
+     * @param speedMs 当前速度（m/s，来自 GPS speed）
+     */
+    fun predict(dtMs: Long, headingDeg: Float, speedMs: Float) {
         if (!initialized) return
+
         val dt = dtMs.toDouble() / 1000.0
-        if (dt <= 0.0 || dt > 1.0) return
+        if (dt <= 0.0 || dt > 1.0) return  // 保护：dt 异常时跳过
 
-        // ── 航向确定（多源优先级）──
-        val speedKmh = speedMs * 3.6
-        val timeSinceGps = System.currentTimeMillis() - lastGpsTimeMs
-        val gpsLost = timeSinceGps > 2000
-        val gyroFresh = gyroAvailable && (System.currentTimeMillis() - lastGyroTimeMs < 500)
-
-        val effectiveHeading = when {
-            !gpsLost && speedKmh > 3.0 && headingDeg >= 0 -> headingDeg.toDouble()
-            gpsLost && gyroFresh -> heading + gyroRateDegPerSec * dt
-            rvAvailable -> rvSmoothed
-            compassAvailable -> compassSmoothed
-            else -> heading
-        }
-
-        // 航向 EMA 平滑
-        var hDiff = effectiveHeading - heading
-        if (hDiff > 180) hDiff -= 360
-        if (hDiff < -180) hDiff += 360
-        val hAlpha = when {
-            gpsLost && gyroFresh -> 1.0
-            speedKmh > 3.0 -> 0.3
-            rvAvailable -> 0.25
-            else -> 0.15
-        }
-        heading += hAlpha * hDiff
-        if (heading < 0) heading += 360
-        if (heading >= 360) heading -= 360
-
-        // ── 速度处理 ──
+        // 更新速度和航向
+        this.heading = headingDeg.toDouble()
         this.speed = speedMs.toDouble()
 
         // 分解速度到北/东
@@ -171,94 +122,113 @@ class EkfDeadReckoning {
         val newVN = speed * cos(headingRad)
         val newVE = speed * sin(headingRad)
 
-        // 速度 EMA 平滑
+        // 速度 EMA 平滑（防止 GPS 速度突变导致位置跳变）
         val speedAlpha = 0.3
         vN += speedAlpha * (newVN - vN)
         vE += speedAlpha * (newVE - vE)
 
-        // ── 位置积分 ──
+        // ── 状态预测 ──
+        // lat += vN * dt / 111111  (1度 ≈ 111111m)
+        // lng += vE * dt / (111111 * cos(lat))
         val latRad = Math.toRadians(lat)
         lat += vN * dt / 111111.0
-        lng += vE * dt / (111111.0 * cos(latRad).coerceAtLeast(0.01))
+        lng += vE * dt / (111111.0 * cos(latRad))
 
-        // GPS 丢失衰减
-        if (gpsLost) {
-            val decay = 0.995
-            vN *= decay; vE *= decay; speed *= decay
+        // GPS 丢失衰减：超过 2 秒没有 GPS，速度自然衰减
+        val timeSinceGps = System.currentTimeMillis() - lastGpsTimeMs
+        if (timeSinceGps > 2000) {
+            val decay = 0.995  // 每帧衰减 0.5%
+            vN *= decay
+            vE *= decay
+            speed *= decay
             gpsLostTimeMs = timeSinceGps
         } else {
             gpsLostTimeMs = 0L
         }
 
-        // ── 协方差预测 ──
-        val qLat = (ACCEL_NOISE * dt).pow(2) / (111111.0 * 111111.0)
-        val qV = (ACCEL_NOISE * dt).pow(2)
+        // ── 协方差预测 (P = FPF' + Q) ──
+        // 简化：只更新对角线
+        val qLat = (ACCEL_NOISE * dt) * (ACCEL_NOISE * dt) / (111111.0 * 111111.0)
+        val qLng = qLat  // 近似
+        val qV = (ACCEL_NOISE * dt) * (ACCEL_NOISE * dt)
 
-        P[0][0] += qLat + 2.0 * dt * P[0][2]
-        P[1][1] += qLat + 2.0 * dt * P[1][3]
-        P[2][2] += qV
-        P[3][3] += qV
+        P[0][0] += qLat + 2.0 * dt * P[0][2]  // lat 方差增长（含速度-位置耦合）
+        P[1][1] += qLng + 2.0 * dt * P[1][3]  // lng 方差增长
+        P[2][2] += qV                            // vN 方差增长
+        P[3][3] += qV                            // vE 方差增长
 
-        // GPS 丢失越久，过程噪声越大
-        val driftScale = 1.0 + (gpsLostTimeMs / 60000.0) * 2.0
-        P[0][0] *= (1.0 + (driftScale - 1.0) * 0.01)
-        P[1][1] *= (1.0 + (driftScale - 1.0) * 0.01)
-
-        // 上限
-        val maxPosVar = (50.0 * 50.0) / (111111.0 * 111111.0)
+        // 限制协方差上界（防止 GPS 长时间丢失后方差爆炸）
+        val maxPosVar = (50.0 * 50.0) / (111111.0 * 111111.0)  // 50m 对应的位置方差
         P[0][0] = minOf(P[0][0], maxPosVar)
         P[1][1] = minOf(P[1][1], maxPosVar)
-        P[2][2] = minOf(P[2][2], 100.0)
+        P[2][2] = minOf(P[2][2], 100.0)  // 速度方差上限 100 (m/s)²
         P[3][3] = minOf(P[3][3], 100.0)
     }
 
-    // === 更新步（Update）— GPS 到达时 ===
-
+    /**
+     * 更新步（Update）— GPS 到达时调用
+     *
+     * 用 GPS 观测值校正 EKF 状态
+     * 卡尔曼增益 K 决定"信 GPS 多少"：
+     * - GPS 精度好（R 小）→ K 大 → 多信 GPS
+     * - GPS 精度差（R 大）→ K 小 → 多信 IMU
+     * - 预测方差大（P 大）→ K 大 → 更需要 GPS 校正
+     *
+     * @param gpsLat GPS 纬度
+     * @param gpsLng GPS 经度
+     * @param accuracy GPS 精度（米）
+     * @param timeMs 当前时间戳
+     */
     fun update(gpsLat: Double, gpsLng: Double, accuracy: Float, timeMs: Long) {
         if (!initialized) {
             initialize(gpsLat, gpsLng, 0f, 0f, timeMs)
             return
         }
 
-        val accD = accuracy.toDouble().coerceAtLeast(1.0)
-        gpsR = when {
-            accD < 5.0 -> accD
-            accD < 15.0 -> accD * 2.0
-            else -> accD * 5.0
-        }.coerceAtLeast(GPS_R_FLOOR)
+        // 更新 GPS 观测噪声
+        gpsR = maxOf(accuracy.toDouble(), 3.0)  // 最小 3m（避免过度信任 GPS）
 
+        // ── 观测残差（Innovation）──
+        // y = z - Hx，其中 H = [1 0 0 0; 0 1 0 0]（直接观测 lat, lng）
         val yLat = gpsLat - lat
         val yLng = gpsLng - lng
+
+        // 转换为米（用于显示/调试）
         val innovMeters = sqrt(
-            (yLat * 111111.0).pow(2) +
-            (yLng * 111111.0 * cos(Math.toRadians(lat))).pow(2)
+            (yLat * 111111.0) * (yLat * 111111.0) +
+            (yLng * 111111.0 * cos(Math.toRadians(lat))) * (yLng * 111111.0 * cos(Math.toRadians(lat)))
         )
         lastInnovation = innovMeters
 
-        val effectiveR = if (innovMeters > 50.0) gpsR * 3.0 else gpsR
-
-        val rLat = (effectiveR / 111111.0).pow(2)
-        val rLng = (effectiveR / (111111.0 * cos(Math.toRadians(lat)).coerceAtLeast(0.01))).pow(2)
+        // ── 残差协方差 S = HPH' + R ──
+        val rLat = (gpsR / 111111.0) * (gpsR / 111111.0)
+        val rLng = (gpsR / (111111.0 * cos(Math.toRadians(lat)))) *
+                   (gpsR / (111111.0 * cos(Math.toRadians(lat))))
 
         val sLat = P[0][0] + rLat
         val sLng = P[1][1] + rLng
+
+        // ── 卡尔曼增益 K = PH⁻¹S⁻¹（对角近似）──
         val kLat = P[0][0] / sLat
         val kLng = P[1][1] / sLng
         lastKalmanGain = maxOf(kLat, kLng)
 
+        // ── 状态更新 x = x + Ky ──
         lat += kLat * yLat
         lng += kLng * yLng
 
-        val gpsInterval = maxOf(0.5, (timeMs - lastGpsTimeMs).toDouble() / 1000.0)
-        val kV = 0.1 * maxOf(kLat, kLng)
-        vN += kV * (yLat * 111111.0 / gpsInterval)
-        vE += kV * (yLng * 111111.0 * cos(Math.toRadians(lat)).coerceAtLeast(0.01) / gpsInterval)
+        // 速度也做小幅校正（位置校正隐含速度信息）
+        val kV = 0.1 * maxOf(kLat, kLng)  // 速度校正比位置校正弱
+        vN += kV * (yLat * 111111.0 / maxOf(1.0, (timeMs - lastGpsTimeMs).toDouble() / 1000.0))
+        vE += kV * (yLng * 111111.0 * cos(Math.toRadians(lat)) / maxOf(1.0, (timeMs - lastGpsTimeMs).toDouble() / 1000.0))
 
+        // ── 协方差更新 P = (I - KH)P ──
         P[0][0] *= (1.0 - kLat)
         P[1][1] *= (1.0 - kLng)
         P[2][2] *= (1.0 - kV)
         P[3][3] *= (1.0 - kV)
 
+        // 交叉项衰减
         P[0][2] *= 0.5; P[2][0] *= 0.5
         P[1][3] *= 0.5; P[3][1] *= 0.5
 
@@ -266,57 +236,23 @@ class EkfDeadReckoning {
         gpsLostTimeMs = 0L
     }
 
-    // === 路网约束更新 ===
-
-    fun roadConstrainedUpdate(snapLat: Double, snapLng: Double, confidence: Double,
-                               roadHeading: Float, timeMs: Long) {
-        if (!initialized) return
-        roadHeadingDeg = roadHeading.toDouble()
-        snapConfidence = confidence
-        if (confidence < 0.3) return
-
-        val pseudoR = (5.0 / confidence.coerceAtLeast(0.1)).coerceAtMost(30.0)
-        val rLat = (pseudoR / 111111.0).pow(2)
-        val cosLat = cos(Math.toRadians(lat)).coerceAtLeast(0.01)
-        val rLng = (pseudoR / (111111.0 * cosLat)).pow(2)
-
-        val yLat = snapLat - lat
-        val yLng = snapLng - lng
-        val sLat = P[0][0] + rLat
-        val sLng = P[1][1] + rLng
-        val kLat = P[0][0] / sLat
-        val kLng = P[1][1] / sLng
-
-        val scale = confidence.coerceIn(0.0, 0.6)
-        lat += kLat * yLat * scale
-        lng += kLng * yLng * scale
-        P[0][0] *= (1.0 - kLat * scale)
-        P[1][1] *= (1.0 - kLng * scale)
-    }
-
-    // === 查询接口 ===
-
+    /**
+     * 获取当前位置不确定度（米）
+     * 用于 UI 显示和 HMM sigma 自适应
+     */
     fun getPositionUncertainty(): Double {
         val latStd = sqrt(maxOf(0.0, P[0][0])) * 111111.0
-        val lngStd = sqrt(maxOf(0.0, P[1][1])) * 111111.0 * cos(Math.toRadians(lat)).coerceAtLeast(0.01)
+        val lngStd = sqrt(maxOf(0.0, P[1][1])) * 111111.0 * cos(Math.toRadians(lat))
         return sqrt(latStd * latStd + lngStd * lngStd)
     }
 
+    /**
+     * 获取 EKF 状态摘要（用于 HUD 显示）
+     */
     fun getStatusString(): String {
         val unc = getPositionUncertainty()
         val gpsAge = System.currentTimeMillis() - lastGpsTimeMs
-        val headingSource = when {
-            speed * 3.6 > 3.0 && gpsAge < 2000 -> "GPS"
-            gpsAge > 2000 && gyroAvailable -> "陀螺"
-            rvAvailable -> "RV"
-            compassAvailable -> "罗盘"
-            else -> "惯导"
-        }
         val mode = if (gpsAge < 2000) "GPS+IMU" else "IMU-DR"
-        val snapTag = if (snappedToRoad && snapConfidence > 0.3) "⊕路" else ""
-        return "$mode[$headingSource]$snapTag " +
-                "K=${String.format("%.2f", lastKalmanGain)} " +
-                "Δ=${String.format("%.1f", lastInnovation)}m " +
-                "σ=${String.format("%.1f", unc)}m"
+        return "${mode} K=${String.format("%.2f", lastKalmanGain)} Δ=${String.format("%.1f", lastInnovation)}m σ=${String.format("%.1f", unc)}m"
     }
 }

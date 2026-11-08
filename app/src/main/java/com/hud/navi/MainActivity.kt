@@ -684,23 +684,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         val dt = if (lastFrameTime == 0L) 16L else (now - lastFrameTime).coerceIn(1L, 100L)
         lastFrameTime = now
 
-        // === v10.20: 传递罗盘数据给 EKF ===
-        if (hasRotationVector && rvInitialized) {
-            ekf.updateCompass(rvHeadingSmooth)
-        } else if (compassInitialized) {
-            ekf.updateCompass(compassBearing)
-        }
-
-        // v10.21: 传递线性加速度幅度给 EKF
-        val linearAccelMag = kotlin.math.sqrt(
-            smoothedWorldAcc[0].toDouble() * smoothedWorldAcc[0].toDouble() +
-            smoothedWorldAcc[1].toDouble() * smoothedWorldAcc[1].toDouble() +
-            smoothedWorldAcc[2].toDouble() * smoothedWorldAcc[2].toDouble()
-        )
-
-        ekf.predict(dt, vehicleBearing, targetSpeed * 1000f / 3600f, linearAccelMag,
-            worldAccN = smoothedWorldAcc[0].toDouble(),
-            worldAccE = smoothedWorldAcc[1].toDouble())
+        ekf.predict(dt, vehicleBearing, targetSpeed * 1000f / 3600f)
 
         vehicleLat = ekf.lat; vehicleLng = ekf.lng
 
@@ -745,39 +729,12 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         var snapped: Pair<Double, Double>? = null
         snapped = hmmMapMatchWithSigma(vehicleLat, vehicleLng, targetSpeed, vehicleBearing, adaptiveSigma)
 
-        // === v10.20: 路网吸附仅作为微调注入 EKF（不再控制惯导激活） ===
-        if (snapped != null && hmmConfidence > HMM_MIN_CONFIDENCE) {
-            ekf.snappedToRoad = true
-            // 计算吸附路段走向
-            if (matchedSegIdx >= 0 && matchedSegIdx < hudView.roadSegments.size) {
-                val seg = hudView.roadSegments[matchedSegIdx]
-                if (seg.points.size >= 2) {
-                    val midIdx = seg.points.size / 2
-                    val (p1Lat, p1Lng) = seg.points[maxOf(0, midIdx - 1)]
-                    val (p2Lat, p2Lng) = seg.points[minOf(seg.points.size - 1, midIdx)]
-                    ekf.roadHeadingDeg = bearingBetween(p1Lat, p1Lng, p2Lat, p2Lng).toDouble()
-                }
-            }
-            // 路网约束微调（修正 IMU 累积漂移）
-            if (hmmConfidence > 0.3) {
-                ekf.roadConstrainedUpdate(
-                    snapped.first, snapped.second,
-                    hmmConfidence, ekf.roadHeadingDeg.toFloat(),
-                    System.currentTimeMillis()
-                )
-            }
-        } else {
-            ekf.snappedToRoad = false
-            ekf.snapConfidence = 0.0
-        }
-
-        // === v10.20: 平滑绘制位置（更保守的吸附混合，减少跳变） ===
+        // === 平滑绘制位置：消除吸附/脱吸附抖动 ===
         if (!snapInit) {
             smoothDrawLat = vehicleLat; smoothDrawLng = vehicleLng; snapInit = true
         }
-        // v10.20: 更慢的融入/退出速度，避免突然跳变
-        val snapAlphaUp = 0.15    // 吸附融入更慢（~7帧达到95%，约0.12秒）
-        val snapAlphaDown = 0.08  // 退出更平滑（~12帧归零，约0.2秒）
+        val snapAlphaUp = 0.3
+        val snapAlphaDown = 0.02
 
         if (snapped != null) {
             snapBlend = (snapBlend + snapAlphaUp).coerceAtMost(1.0)
@@ -899,10 +856,6 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         when (event.sensor.type) {
             Sensor.TYPE_ACCELEROMETER -> {
                 System.arraycopy(event.values, 0, accData, 0, 3)
-                // v14.0: 原始加速度计+陀螺仪传给 EKF 做姿态解算
-                if (gyroData[0] != 0f || gyroData[1] != 0f || gyroData[2] != 0f) {
-                    ekf.updateIMU(event.values, gyroData, event.timestamp)
-                }
             }
             Sensor.TYPE_MAGNETIC_FIELD -> System.arraycopy(event.values, 0, magData, 0, 3)
             Sensor.TYPE_GYROSCOPE -> {
@@ -911,11 +864,6 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                 gyroHeadingRate = rawRate
                 gyroHeadingRateSmooth += GYRO_SMOOTH * (rawRate - gyroHeadingRateSmooth)
                 lastGyroTime = System.currentTimeMillis()
-                ekf.updateGyroRate(gyroHeadingRateSmooth)
-                // v14.0: 也把陀螺仪数据传给 EKF 做姿态解算
-                if (accData[0] != 0f || accData[1] != 0f || accData[2] != 0f) {
-                    ekf.updateIMU(accData, event.values, event.timestamp)
-                }
             }
             Sensor.TYPE_ROTATION_VECTOR -> {
                 val rotMat = FloatArray(9)
@@ -929,8 +877,6 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                     val diff = ((rawHeading - rvHeadingSmooth + 540f) % 360f) - 180f
                     rvHeadingSmooth = ((rvHeadingSmooth + 0.15f * diff) + 360f) % 360f
                 }
-                // v12.5: 旋转矢量航向传给 EKF，低速时比纯罗盘稳定得多
-                ekf.updateRotationVector(rvHeadingSmooth)
             }
             Sensor.TYPE_LINEAR_ACCELERATION -> {
                 val R = FloatArray(9); val I = FloatArray(9)
