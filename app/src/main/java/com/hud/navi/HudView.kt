@@ -213,8 +213,10 @@ class HudView @JvmOverloads constructor(
             val pts = seg.points
             if (pts.size < 2) continue
 
-            // 道路颜色
-            val (fillColor, outlineW, fillW) = getRoadStyle(seg.highwayType)
+            // 使用 RoadType 枚举自带的颜色和宽度
+            val fillColor = seg.type.color
+            val fillW = seg.type.widthBase * 1.5f   // HUD 模式下线条加粗
+            val outlineW = fillW + 3f
 
             // 先画轮廓（深色描边）
             roadOutlinePaint.strokeWidth = outlineW
@@ -225,19 +227,6 @@ class HudView @JvmOverloads constructor(
             roadPaint.strokeWidth = fillW
             roadPaint.color = fillColor
             drawPolyline(canvas, pts, w, h, roadPaint)
-        }
-    }
-
-    private fun getRoadStyle(type: String): Triple<Int, Float, Float> {
-        return when (type) {
-            "motorway", "motorway_link" -> Triple(Color.parseColor("#E53935"), 10f, 7f)
-            "trunk", "trunk_link", "primary", "primary_link" -> Triple(Color.parseColor("#FF8F00"), 9f, 6f)
-            "secondary", "secondary_link" -> Triple(Color.parseColor("#FFB300"), 8f, 5f)
-            "tertiary", "tertiary_link" -> Triple(Color.parseColor("#FFCA28"), 7f, 4.5f)
-            "residential", "living_street" -> Triple(Color.parseColor("#78909C"), 6f, 4f)
-            "service" -> Triple(Color.parseColor("#546E7A"), 5f, 3f)
-            "unclassified" -> Triple(Color.parseColor("#90A4AE"), 5f, 3.5f)
-            else -> Triple(Color.parseColor("#607D8B"), 4f, 2.5f)
         }
     }
 
