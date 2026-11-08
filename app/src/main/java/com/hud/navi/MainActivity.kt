@@ -643,8 +643,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
             roadFetchJob = scope.launch {
                 val segments = RoadFetcher.fetchRoads(targetLat, targetLng)
                 hudView.setRoads(segments, targetLat, targetLng)
-                intersections = buildIntersections(segments)
-                Log.i(TAG, "Roads: ${segments.size} segments, ${intersections.size} intersections")
+                Log.i(TAG, "Roads: ${segments.size} segments loaded")
             }
         }
     }
