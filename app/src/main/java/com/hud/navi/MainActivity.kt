@@ -245,7 +245,7 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
         val diskSegments = RoadFetcher.loadDiskCache()
         if (diskSegments.isNotEmpty()) {
             hudView.setRoads(diskSegments, 0.0, 0.0)
-            RoadFetcher.markRendered()
+            // v10.0: incremental rendering not available
             Log.i(TAG, "Loaded ${diskSegments.size} cached segments at startup (marked as rendered)")
         }
 
@@ -327,9 +327,9 @@ class MainActivity : AppCompatActivity(), LocationListener, SensorEventListener 
                     put("vehicle_speed", hudView.vehicleSpeed)
                     put("vehicle_bearing", vehicleBearing)
                     put("mirror_enabled", hudView.mirrorEnabled)
-                    put("zoom_offset", 0f)  // v10.0: no zoomOffset
-                    put("navigation_active", false)  // v10.0: no navigation rendering
-                    put("navigation_destination", "")  // v10.0: no navigation rendering
+                    put("zoom_offset", 0f)
+                    put("navigation_active", false)
+                    put("navigation_destination", "")
                 }
             }
         })
